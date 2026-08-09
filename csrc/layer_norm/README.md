@@ -1,20 +1,18 @@
-This CUDA extension implements fused dropout + residual + LayerNorm, building on
-Apex's [FastLayerNorm](https://github.com/NVIDIA/apex/tree/master/apex/contrib/layer_norm).
-Major changes:
-- Add dropout and residual.
-- Make it work for both pre-norm and post-norm architecture.
-- Support more hidden dimensions (all dimensions divisible by 8, up to 8192).
-- Implement RMSNorm as an option.
-- Support layer norm with parallel residual (e.g., GPT-J, GPT-NeoX, PaLM).
+这个 CUDA 扩展实现了融合的 dropout + 残差 + LayerNorm，基于 Apex 的 [FastLayerNorm](https://github.com/NVIDIA/apex/tree/master/apex/contrib/layer_norm)。
+主要改动：
+- 增加 dropout 和残差。
+- 同时支持 pre-norm 和 post-norm 架构。
+- 支持更多隐藏维度（所有能被 8 整除的维度，最大到 8192）。
+- 实现 RMSNorm 作为选项。
+- 支持带并行残差的 LayerNorm（例如 GPT-J、GPT-NeoX、PaLM）。
 
-If you want to use it for dimensions larger than 8k, please file an issue.
+如果你需要对大于 8k 的维度使用它，请提交 issue。
 
-This extension has only been tested on A100s.
+这个扩展只在 A100 上测试过。
 
 ```sh
 cd csrc/layer_norm && pip install .
 ```
 
-As of 2024-01-05, this extension is no longer used in the FlashAttention repo.
-We've instead switched to a Triton-based
-[implementation](https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/triton/layer_norm.py).
+截至 2024-01-05，FlashAttention 仓库不再使用这个扩展。
+我们转而使用基于 Triton 的[实现](https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/triton/layer_norm.py)。

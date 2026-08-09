@@ -1,51 +1,53 @@
-# SM90 FWD R2P Masking — SASS Investigation
+# SM90 前向 R2P 掩码——SASS 调查
 
-## SASS Instruction Counts (hdim=128, seqlen=113, tile_n=128)
+## SASS 指令计数（hdim=128, seqlen=113, tile_n=128）
 
-With tile_n=128, SM90 has 32 accumulator elements per row (1 chunk of 32).
+tile_n=128 时，SM90 每行有 32 个累加器元素（1 个 32 元素的 chunk）。
 
-### Non-causal (seqlen-only masking)
+### 非因果（仅 seqlen 掩码）
 
-| Metric | Old (no R2P) | New (R2P) | Delta |
+| 指标 | 旧版（无 R2P） | 新版（R2P） | 差值 |
 |--------|-------------|-----------|-------|
-| **Total instructions** | 3104 | 3072 | **-32 (-1%)** |
+| **总指令数** | 3104 | 3072 | **-32 (-1%)** |
 | R2P | 0 | 4 | +4 |
 | FSEL | 70 | 70 | 0 |
 | ISETP | 55 | 22 | **-33** |
 | SHF | 69 | 73 | +4 |
 | LOP3 | 51 | 56 | +5 |
 
-R2P replaces 33 ISETP (integer set-predicate) instructions with 4 R2P + a few LOP3/SHF. Net savings: 32 instructions. The 4 R2P instructions each convert one byte of a 32-bit bitmask into 7 predicates, covering all 32 elements (4 × 8 bits = 32).
+R2P 用 4 条 R2P 加少量 LOP3/SHF 替换了 33 条 ISETP（整数设置谓词）。净省 32 条指令。每条 R2P 把 32 位位掩码的一个字节转换成 7 个谓词，覆盖全部 32 个元素（4 × 8 bit = 32）。
 
-### Causal
+### 因果
 
-| Metric | Old (no R2P) | New (R2P) | Delta |
+| 指标 | 旧版（无 R2P） | 新版（R2P） | 差值 |
 |--------|-------------|-----------|-------|
-| **Total instructions** | 5008 | 4857 | **-151 (-3%)** |
+| **总指令数** | 5008 | 4857 | **-151 (-3%)** |
 | R2P | 0 | 24 | +24 |
 | FSEL | 200 | 200 | 0 |
 | ISETP | 225 | 22 | **-203** |
 | SHF | 104 | 105 | +1 |
 | LOP3 | 81 | 105 | +24 |
 
-Much larger savings. The causal kernel applies masking per-row (each row has a different col_limit), so it has many more masking operations. 24 R2P instructions replace 203 ISETP instructions, saving 151 total.
+节省大得多。因果内核逐行应用掩码（每行的 col_limit 不同），掩码操作多得多。24 条 R2P 替换了 203 条 ISETP，总共省 151 条。
 
-### Local (sliding window, wl=64 wr=0)
+### 局部窗口（sliding window，wl=64 wr=0）
 
-| Metric | Old (no R2P) | New (R2P) | Delta |
+| 指标 | 旧版（无 R2P） | 新版（R2P） | 差值 |
 |--------|-------------|-----------|-------|
-| **Total instructions** | 7296 | 6217 | **-1079 (-15%)** |
+| **总指令数** | 7296 | 6217 | **-1079 (-15%)** |
 | R2P | 0 | 32 | +32 |
 | FSEL | 522 | 266 | **-256** |
 | ISETP | 554 | 22 | **-532** |
 | SHF | 115 | 73 | -42 |
 | LOP3 | 96 | 56 | -40 |
 
-Dramatic savings. Local masking has two bounds (left + right) per row, doubling the masking work. R2P eliminates 532 ISETP and 256 FSEL instructions, saving 1079 total (15% of kernel).
+节省巨大。局部掩码每行有两个边界（左 + 右），掩码工作量翻倍。R2P 消除了 532 条 ISETP 和 256 条 FSEL，总共省 1079 条（内核的 15%）。
 
-## How R2P Works in SASS
+> 讲解：为什么局部窗口收益最大？因果/非因果掩码每行只有 0 或 1 个边界，而局部窗口（如 sliding window attention）每行有两个边界，谓词生成次数最多；同时窗口内大量 tile 只有部分列被掩掉，掩码开销占比高。R2P 让"一个字节的位掩码 → 7 个谓词"一步到位，把原本逐位比较的 ISETP 序列整体压缩。
 
-The compiler generates this pattern:
+## R2P 在 SASS 中的工作方式
+
+编译器生成这种模式：
 
 ```
 SHF.R.U32.HI R9, RZ, R9, R16    ; shift to create bitmask
@@ -58,11 +60,13 @@ R2P PR, R9.B2, 0x7f              ; byte 2
 R2P PR, R9.B3, 0x7f              ; byte 3
 ```
 
-Each `R2P` converts 7 bits of a register byte into 7 predicate registers simultaneously (1 instruction instead of 7 `ISETP`). The subsequent `FSEL` instructions use these predicates for conditional masking.
+每条 `R2P` 把一个寄存器字节的 7 个位同时转换成 7 个谓词寄存器（1 条指令替代 7 条 `ISETP`）。随后的 `FSEL` 指令用这些谓词做条件掩码。
 
-### Handling the leftover bits (32 is not divisible by 7)
+> 讲解：R2P 是 "register-to-predicate"（寄存器转谓词）指令。掩码的本质是"哪些列保留"的位掩码；ISETP 方式要逐位做整数比较来设置谓词，而 R2P 直接用位到谓词的硬件映射，一条指令铺开 7 个谓词。FSEL（浮点条件选择）再用谓词决定保留原值还是置为 -inf，从而在 softmax 前把被掩位置为负无穷。
 
-The `0x7f` immediate tells R2P to map bits 0-6 of each byte to P0-P6, but bit 7 (the MSB of each byte) is not covered. For 32 elements across 4 bytes, that's 4 leftover elements (bits 7, 15, 23, 31). The compiler handles these with separate `LOP3.LUT` or `ISETP` instructions:
+### 处理剩余位（32 不能被 7 整除）
+
+`0x7f` 立即数告诉 R2P 把每个字节的位 0-6 映射到 P0-P6，但位 7（每字节的 MSB）不被覆盖。32 个元素跨 4 个字节，就有 4 个剩余元素（位 7、15、23、31）。编译器用单独的 `LOP3.LUT` 或 `ISETP` 处理：
 
 ```
 R2P PR, R12,     0x7f           ; bits 0-6   → P0-P6  (7 elements)
@@ -86,11 +90,11 @@ ISETP.GT P0, R12, -1            ; test bit 31 (sign bit) (1 element)
   2× FSEL using P0
 ```
 
-Total: 4×7 = 28 elements via R2P + 4 elements via LOP3/ISETP = 32. Each R2P replaces 7 ISETP with 1 instruction, so net savings is `(7-1) × 4 = 24` predicate-generation instructions per mask application. Additionally, ptxas can overlap R2P with FSEL since they write to separate predicate registers.
+总计：4×7 = 28 个元素走 R2P + 4 个元素走 LOP3/ISETP = 32。每条 R2P 用 1 条指令替换 7 条 ISETP，所以每次掩码应用净省 `(7-1) × 4 = 24` 条谓词生成指令。此外 ptxas 可以把 R2P 与 FSEL 重叠执行，因为它们写入不同的谓词寄存器。
 
-## Performance Impact
+## 性能影响
 
-| Case | Old (ms) | New (ms) | Speedup |
+| 场景 | 旧版 (ms) | 新版 (ms) | 加速 |
 |------|----------|----------|---------|
 | Causal hdim=64 s=8192 | 2.463 | 2.473 | ~0% |
 | Causal hdim=128 s=8192 | 1.937 | 1.944 | ~0% |
@@ -98,4 +102,6 @@ Total: 4×7 = 28 elements via R2P + 4 elements via LOP3/ISETP = 32. Each R2P rep
 | Local hdim=128 s=8192 | 0.237 | 0.222 | **+7%** |
 | Non-causal hdim=128 s=4096 | 1.742 | 1.728 | ~1% |
 
-Causal sees no perf gain despite fewer instructions because masking is a tiny fraction of total work (dominated by WGMMA). Local sees significant gains because the sliding window has many partially-masked blocks where masking overhead matters more.
+因果没有性能收益，尽管指令更少——因为掩码只是总工作量的一小部分（大头是 WGMMA）。局部窗口收益显著，因为滑动窗口有很多部分掩码的块，掩码开销占比更高。
+
+> 讲解：指令数减少 3% 不等于性能提升 3%。在 Hopper 上，HGMMA/WGMMA 这类长延迟、高吞吐的矩阵指令吃掉了绝大部分执行时间，掩码相关的 ALU 指令大多能藏在阴影里。只有当掩码指令占比高（局部窗口）或阻塞了调度（指令依赖链变长）时，减指令才能转化为可测的性能收益——这也解释了为什么因果场景"减了 151 条指令却几乎没提速"。

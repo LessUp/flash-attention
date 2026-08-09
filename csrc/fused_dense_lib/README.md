@@ -1,12 +1,9 @@
-This CUDA extension implements fused matmul + bias (forward and backward), and fused matmul + bias + gelu
-(forward and backward), adapted from Apex's
-[FusedDense](https://github.com/NVIDIA/apex/tree/master/apex/fused_dense).
-We make it work for bfloat16.
+这个 CUDA 扩展实现了融合的 matmul + bias（前向和反向），以及融合的 matmul + bias + gelu（前向和反向），改编自 Apex 的 [FusedDense](https://github.com/NVIDIA/apex/tree/master/apex/fused_dense)。
+我们让它支持 bfloat16。
 
-For best performance, you should use CUDA >= 11.8. CuBLAS versions before
-this doesn't have the best matmul + bias + gelu performance for bfloat16.
+为了最佳性能，应使用 CUDA >= 11.8。此前的 CuBLAS 版本对 bfloat16 没有最好的 matmul + bias + gelu 性能。
 
-It has only been tested on A100s.
+它只在 A100 上测试过。
 
 ```sh
 cd csrc/fused_dense_lib && pip install .

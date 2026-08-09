@@ -1,57 +1,31 @@
-# Debugging Method: Root-Cause Discipline
+# 调试方法论：根因纪律
 
-Companion to the artifact-specific docs in `AI/`. Those tell you *what* the tools
-show; this one governs *how the investigation is run* — when a theory has earned
-implementation effort, and when to stop.
+与 `AI/` 下各专题文档互为补充。那些文档说明工具能展示 *什么*；本文规定 *调查如何进行*——一个理论在什么条件下值得投入实现，以及何时该停下。
 
-Applies to: hangs, deadlocks, illegal-address traps, Xid faults, sanitizer
-reports, and numerical mismatches where the defect is **not visible in the
-CuteDSL source**. Not to ordinary bugs where reading the code finds it.
+适用范围：无法在 CuteDSL 源码中直接看出的缺陷所引发的挂起（hang）、死锁、非法地址陷阱（illegal-address trap）、Xid 故障、sanitizer 报告和数值不匹配。普通"读代码就能找到"的 bug 不在本文讨论范围。
 
-Written after a real investigation (anonymized) spent hours building fixes on a
-theory that was internally consistent, explained every observation, and was
-wrong — the falsifier was checkable in minutes and already sitting in the
-session's own logs. Two successor theories followed; the last was adopted
-*after* the working fix landed, survived every validation run, and fell only
-when the fix was disassembled and contained nothing resembling its credited
-mechanism. Three wrong mechanisms, one episode. The overhead below is cheap
-relative to that.
+本文写自一次真实调查（已匿名）：当时花费数小时，基于一个内部自洽、能解释所有观察、但却是错误的理论去构建修复——而它的证伪检查只需几分钟，且早已躺在那次会话自己的日志里。随后又提出两个后继理论；最后一个在修复落地 *之后* 才被采纳，通过了全部验证运行，直到修复被反汇编后发现其中根本没有任何与它声称机制相似的东西。三个错误机制，一次事件。相比之下，下面的这套开销极其廉价。
 
 ---
 
-## The protocol, compressed
+## 协议（压缩版）
 
-Re-read this list before writing any fix. The rest of the doc is rationale;
-this is the contract.
+在写任何修复之前重读这份清单。文档其余部分是理由阐述；这份清单才是契约。
 
-1. **No patch before a checked prediction.** Write the theory block (Theory /
-   Predicts / Falsified by / Cost to check / Status) into
-   `agent_space/ledger_<bug-slug>.md` and run the check — starting with evidence
-   already captured; the falsifier is often already in your logs. No falsifier →
-   not a theory → no patch.
-2. **Trap-time evidence confirms only predictions registered in advance** —
-   never a story assembled after looking at it.
-3. **Every hex offset, register name, or line number you cite must be greppable
-   verbatim** in an artifact saved under `agent_space/`, cited as `file:line`.
-   Fails the grep → fabricated → delete the claim.
-4. **Validating a fix:** wipe the compile cache; run fixed and unfixed builds
-   N ≥ 10 each; run the perturbation control (a semantically neutral edit — if
-   it also "fixes" the bug, green runs mean nothing about mechanism).
-5. **Disassemble the fix before explaining it.** Diff normalized SASS of both
-   builds; confirm the fix's hypothesized action exists in the binary at all.
-   (Fixes have turned out to compile to a literal NOP.)
-6. **Two failed fixes on one theory, or three reconciliations to save it, kills
-   it.** Restart from the evidence or escalate.
+1. **没有经过验证的预测就不打补丁。** 把理论块（Theory / Predicts / Falsified by / Cost to check / Status）写进 `agent_space/ledger_<bug-slug>.md` 并运行检查——先从已捕获的证据开始；证伪条件往往已经躺在你的日志里。没有证伪条件 → 不是理论 → 不许打补丁。
+2. **陷阱时刻捕获的证据只能确认事先登记的预测**——绝不允许事后"看着结果拼故事"。
+3. **你引用的每个十六进制偏移、寄存器名或行号，都必须能在 `agent_space/` 下保存的某个工件中以 `file:line` 形式逐字 grep 到。** grep 不到 → 就是编造 → 删掉该论断。
+4. **验证修复：** 清空编译缓存；修复版与未修复版各跑 N ≥ 10 次；跑扰动对照（一个语义中性的改动——如果它也能"修好"bug，那么绿色运行对机制毫无证明力）。
+5. **解释修复前先反汇编它。** 对两种构建的归一化 SASS 做 diff；确认修复所假设的动作确实存在于二进制中。（已有先例：修复被编译成了字面意义上的 NOP。）
+6. **同一理论上两次修复失败，或为挽救它做三次调适，就判它死刑。** 从证据重新开始，或升级处理。
 
 ---
 
-## The one rule
+## 唯一规则
 
-**A root-cause theory earns implementation effort only after it has made a
-prediction that was checked.**
+**只有当一个根因理论做出了一个被验证过的预测，它才值得投入实现。**
 
-Not "explains all observations" — predicts something not yet observed, cheap to
-test, that would be *false* if the theory is wrong:
+不是"能解释所有观察"——而是预测一个尚未观察到、测试成本低、且若理论错误就必然不成立的现象：
 
 ```
 Theory:      <mechanism, one sentence>
@@ -61,207 +35,104 @@ Cost to check: <minutes>
 Status:      UNTESTED | CONFIRMED | FALSIFIED
 ```
 
-If you cannot name a falsifier you have a narrative, not a theory. Narratives
-are fine as *candidates*; they do not get a patch.
+如果你说不出证伪条件，你有的只是叙事而非理论。叙事作为 *候选* 没问题；但它不配得到补丁。
 
-Illustration, from the motivating episode. Theory: the compiler merged a plain
-SMEM address onto a cluster-rank-encoded base, making the load invalid on
-non-zero-rank CTAs. That predicts **every faulting CTA has non-zero rank** —
-minutes to check, one rank-0 fault kills it. The check was never run; two fixes
-were built and failed, each failure reading as "the fix didn't reach the merge"
-rather than as evidence against it. When the trap logs were finally examined,
-**both captured traps were rank-0** — the falsifying data predated the first
-fix attempt. Corollary: check predictions against evidence you already hold
-before designing new experiments.
+举例（来自那个起因事件）。理论：编译器把一个普通的 SMEM 地址合并进了基于 cluster rank 编码的基地址，导致非零 rank 的 CTA 上加载无效。这预测 **每个出错的 CTA 的 rank 都非零**——几分钟即可检查，任何一个 rank-0 出错就能杀死它。这个检查从未被运行；两个修复相继失败，每次失败都被解读为"修复没到达合并点"而非对该理论的证伪。当陷阱日志最终被查看时，**捕获到的两个陷阱都是 rank-0**——证伪数据比第一次修复尝试还要早。推论：在设计新实验之前，先用你已经掌握的证据去检查预测。
 
-Caution: what transfers from this example is the failure **shape** — coherent
-narrative, unchecked cheap falsifier, patch effort absorbing contrary evidence —
-not the mechanisms. Address CSE, warp reconvergence, barrier asymmetry,
-`sync_warp` fixes: none is an elevated prior for a new bug; reaching for one
-because you read it here is availability bias. The discipline is domain-general —
-the ledger example under "Recording" runs the same protocol on a plain
-numerical mismatch.
+注意：这个例子可迁移的是失败 *形态*——自洽的叙事、未被检查的廉价证伪条件、把相反证据吸收掉的补丁努力——而不是机制本身。CSE、warp 重汇聚、屏障不对称、`sync_warp` 修复：对新的 bug 而言，没有一个具有更高的先验概率；因为你在这里读到就伸手去用，那是可得性偏差（availability bias）。这套纪律是领域通用的——"记录"一节的 ledger 例子用同一套协议处理一个普通的数值不匹配。
 
 ---
 
-## Evidence tiers
+## 证据层级
 
-Rank evidence by how much the defect could have corrupted it.
+按缺陷可能污染证据的程度排序。
 
-**Tier 1 — trustworthy.** Deterministic source-level facts; reproducible
-pass/fail across repeated runs; divergence against a reference implementation
-at a specific tensor index.
+**层级 1 —— 可信。** 确定性的源码级事实；多次运行可复现的通过与失败；与参考实现在某个特定张量索引处的发散。
 
-**Tier 2 — usable, needs corroboration.** PTX (`CUTE_DSL_KEEP_PTX=1`), dumped
-SASS (`CUTE_CUBIN_PATH`), shared-memory layout offsets, `cute.printf` traces.
-Real, but one binary's codegen is not the kernel's semantics.
+**层级 2 —— 可用，需要佐证。** PTX（`CUTE_DSL_KEEP_PTX=1`）、导出的 SASS（`CUTE_CUBIN_PATH`）、共享内存布局偏移、`cute.printf` 追踪。真实，但某个二进制的代码生成不等于内核的语义。
 
-**Tier 3 — contaminated by definition.** Anything captured *at* a trap:
-register values, faulting addresses, block/thread IDs, `CUTE_DSL_LINEINFO`
-attribution, cuda-gdb backtraces after `CUDA_EXCEPTION_*`. The faulting
-instruction is frequently not the wrong instruction, and the reported line not
-the wrong line. Also Tier 3: `compute-sanitizer --tool=racecheck` on raw TMA
-paths — see `AI/RACECHECK_TMA_HAZARD.md` for the known false positives.
+**层级 3 —— 定义上即受污染。** 一切在 *陷阱发生时* 捕获的东西：寄存器值、出错地址、block/线程 ID、`CUTE_DSL_LINEINFO` 归因、`CUDA_EXCEPTION_*` 之后的 cuda-gdb 回溯。出错的指令往往不是错误的指令，报告的行往往不是错误的行。同样属于层级 3：对原始 TMA 路径使用 `compute-sanitizer --tool=racecheck`——已知误报见 `AI/RACECHECK_TMA_HAZARD.md`。
 
-Tier 3 **generates** hypotheses. It confirms one only when a theory built from
-Tier 1/2 evidence predicted a *specific* trap signature in advance and the trap
-matches (the illustration above uses trap logs this way). It never originates
-confirmation post hoc: a story assembled from Tier 3 alone is most dangerous
-when most coherent, because the corruption that produced the fault also
-produced the details that make it fit.
+层级 3 **产生** 假设。只有当基于层级 1/2 证据构建的理论事先预测了一个 *特定的* 陷阱签名、且陷阱与之吻合时，它才确认一个理论（上面的例子正是这样使用陷阱日志的）。它绝不允许事后追溯确认：仅由层级 3 拼出的故事，最自洽时最危险，因为制造故障的那种污染同时也制造了让它显得吻合的细节。
 
-Separate the columns in your notes:
+在笔记中分开两栏：
 
-| Observed (artifact, file:line) | Inferred (causal claim) |
+| 观察到（工件，file:line） | 推断（因果论断） |
 |---|---|
 
-Hallucinated mechanisms live in the right column borrowing credibility from
-the left; if the load-bearing claim has nothing on the left, say so. Make the
-left column auditable: every hex offset, register, or line number quoted must
-be greppable verbatim in an artifact saved under `agent_space/`, cited as
-`file:line` — save the artifact *before* quoting it. Fails the grep → remove
-the claim, not just the citation. Run this check on your own report before
-presenting it.
+被幻觉出来的机制住在右栏，借左栏的信用；如果承重的论断在左栏毫无着落，就直说。让左栏可审计：引用的每个十六进制偏移、寄存器或行号必须能在 `agent_space/` 下保存的工件里逐字 grep 到，以 `file:line` 形式引用——先保存工件 *再* 引用。grep 不到 → 删除论断本身，而不只是删引用。在呈现报告前对自己做一遍这个检查。
 
 ---
 
-## Compile sensitivity: a green run proves almost nothing
+## 编译敏感性：一次绿色运行几乎证明不了什么
 
-FA4 JIT-compiles per configuration; any edit — even a semantically neutral one —
-reshuffles codegen. Consequences:
+FA4 按配置 JIT 编译；任何编辑——哪怕是语义中性的——都会重排代码生成。后果：
 
-1. **A fix may have worked by perturbation.** Two axes, two tests:
-   - *Runtime nondeterminism:* run fixed and unfixed builds **N ≥ 10** each to
-     establish the baseline failure rate — a 1-in-3 bug looks fixed twice in a
-     row. Repeated runs of unchanged source reuse the same cubin: they sample
-     timing, not codegen.
-   - *Codegen sensitivity — the perturbation control:* apply a semantically
-     neutral edit of similar size (a dead local, a reordered declaration). If
-     it also "fixes" the bug, the real fix is, until proven otherwise, just
-     another perturbation.
-   - *Instrumentation is a perturbation too:* a `printf` that makes a hang
-     vanish has located nothing — it has shown the defect is
-     timing/codegen-sensitive, which makes both controls above mandatory.
-2. **Clear the cache when validating.** `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1`
-   persists cubins at `/tmp/${USER}/flash_attention_cute_dsl_cache/`; a
-   "confirmed" run that loaded a stale cubin confirms nothing.
-3. **Config flags that flip a bug are not evidence about mechanism** — the
-   honest reading is "codegen-sensitive defect." The perturbation control turns
-   that suspicion into a test.
-4. **Pin the toolchain.** Record `nvidia-cutlass-dsl`, `ptxas`
-   (`CUTE_DSL_PTXAS_PATH` if custom), and driver versions in the ledger; a
-   miscompile theory is only testable against a fixed toolchain.
+1. **修复可能只是靠扰动起效。** 两个维度，两个测试：
+   - *运行时非确定性：* 修复版与未修复版各跑 **N ≥ 10** 次，确立基线失败率——一个三分之一概率复现的 bug，连续两次看似修好很正常。未改源码的重复运行复用同一个 cubin：它们抽样的是时序，不是代码生成。
+   - *代码生成敏感性——扰动对照：* 应用一个规模相近的语义中性改动（一个死局部变量、一次声明重排）。如果它也能"修好"bug，那么在反证之前，真正的修复只是另一次扰动。
+   - *插桩也是扰动：* 一个让挂起消失的 `printf` 没有定位到任何东西——它只说明缺陷对时序/代码生成敏感，这使上面两个对照都成为必须。
+2. **验证时清空缓存。** `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1` 会把 cubin 持久化到 `/tmp/${USER}/flash_attention_cute_dsl_cache/`；一次加载了陈旧 cubin 的"已确认"运行什么都确认不了。
+3. **能翻转 bug 的配置开关不是关于机制的证据**——诚实的解读是"对代码生成敏感的缺陷"。扰动对照把这个怀疑变成测试。
+4. **锁定工具链。** 在 ledger 中记录 `nvidia-cutlass-dsl`、`ptxas`（如自定义则记录 `CUTE_DSL_PTXAS_PATH`）和驱动版本；错误编译（miscompile）理论只有在固定工具链上才可检验。
 
 ---
 
-## Unfalsifiability tells
+## 不可证伪的迹象
 
-Stop and re-derive when a theory (yours or one handed to you) shows:
+当理论（你自己的或别人给你的）出现以下特征时，停下并重新推导：
 
-- **"Explains every observation."** Real root causes leave loose ends; total
-  closure on the first pass is a warning. (Closure earned by a checked
-  prediction is exempt — the tell is closure by narration.)
-- **A randomness escape hatch** — "the optimizer rolls the dice,"
-  "timing-dependent," "depends which op inherits it." These make every future
-  result confirmatory; a theory that cannot lose is not doing work.
-- **Confidence language with no test attached** — "root cause nailed,"
-  "definitively." Fluency is free; a discriminating experiment is not.
-- **Precision as credential.** Exact hex offsets and register names invite
-  belief — grep the dump for them. Half-right details stitched with invented
-  causal glue is the characteristic failure shape.
+- **"能解释所有观察。"** 真正的根因会留下未解之处；第一遍就全封闭是警告。（靠已验证预测挣来的封闭除外——警示的是靠叙事达成的封闭。）
+- **随机性逃生舱**——"优化器在掷骰子"、"取决于时序"、"取决于哪个操作继承了它"。这会让今后每个结果都变成确认性的；一个不可能输的理论没有在工作。
+- **不带测试的信心语言**——"根因锁定了"、"确定无疑"。流利是免费的；有区分力的实验不是。
+- **把精确当作资历。** 精确的十六进制偏移和寄存器名会招来信任——用它们去 grep dump。半对的细节配上编造的因果胶水，是典型的失败形态。
 
 ---
 
-## When a fix contradicts the theory, the theory is dead
+## 当修复与理论矛盾，理论就死了
 
-If the working fix cannot plausibly act on the hypothesized mechanism — a
-barrier change "fixing" an address-CSE bug, a padding change "fixing" a race —
-that is a **falsification**, not an unexplained detail. The fix and the theory
-are now two separate open questions.
+如果成功的修复无法合理地作用于假设的机制——一个屏障改动"修好"了地址 CSE 的 bug，一个填充改动"修好"了竞态——那是 **证伪**，不是未解释的细节。修复和理论从此是两个独立未决的问题。
 
-Corollary: **a fix that works does not validate the theory it came from.** This
-is the most expensive error available here, because the reward signal (test
-passes) arrives exactly when the reasoning is worst.
+推论：**一个有效的修复并不能验证它来源的理论。** 这是这里最昂贵的错误，因为奖励信号（测试通过）恰好在推理最差时到达。
 
 ---
 
-## Ablation: useful, and weaker than it feels
+## 消融：有用，但比感觉上更弱
 
-To probe mechanism, reduce the fix to the weakest primitive that still works —
-`sync_warp` before a named barrier, one padding element before a full realloc.
-This licenses "the stronger primitive's guarantees were unnecessary *in these
-binaries*" — not "the mechanism is X." Sufficiency is not mechanism, the weaker
-fix may still work by perturbation, and ablations need the same N ≥ 10 and
-cache hygiene as any validation run.
+要探测机制，把修复削减到仍能工作的最弱原语——命名屏障前的 `sync_warp`，完整重新分配前的一个填充元素。这只能为"更强原语的保证 *在这些二进制中* 并不必要"背书——而不是"机制就是 X"。充分性不是机制，更弱的修复仍可能靠扰动起效，而且消融需要与任何验证运行同样的 N ≥ 10 和缓存卫生。
 
-**Disassemble the fix before explaining it.** Dump SASS for both builds (a
-FakeTensorMode compile needs no GPU memory and can be verified bit-identical to
-the real compile), strip addresses/labels/lineinfo, diff. Does the fix's
-hypothesized action appear in the binary at all? Is the diff small enough to
-read end to end? In the motivating episode the weakest-primitive fix emitted no
-synchronization instruction whatsoever — a NOP plus a reshaped ptxas
-convergence region — and the accepted mechanism died on the spot, *after*
-passing every validation run. A mechanism story about a fix nobody has
-disassembled is a story about an imagined binary.
+**解释修复前先反汇编它。** 为两种构建导出 SASS（FakeTensorMode 编译不需要 GPU 内存，且可验证与真实编译逐位一致），剥离地址/标签/行信息后做 diff。修复所假设的动作到底在不在二进制里？diff 是否小到能从头读到尾？在起因事件中，最弱原语修复没有发出任何同步指令——一个 NOP 加一个被重塑的 ptxas 汇聚区域——而这个被接受的机制当场死亡，*就在它* 通过所有验证运行 *之后*。关于一个没人反汇编过的修复的机制故事，是一个关于想象出来的二进制的故事。
 
-**Rule-implication cross-check.** If the mechanism implies a general rule
-("pattern X requires Y"), search the repo for a site with X and no Y that runs
-correctly. One healthy counterexample kills the rule, in minutes.
+**规则-推论交叉检查。** 如果机制蕴含一条通用规则（"模式 X 需要 Y"），在仓库里搜索一个只有 X 没有 Y 却运行正常的位点。一个健康的反例几分钟内就能杀死这条规则。
 
-**Retrospective controls.** A run from earlier in the investigation may already
-vary the hypothesized trigger — usable, but say it was not designed as a
-control, and hold it to the standard: it must differ from the failing
-configuration in **one variable**. Reinterpreting a multi-variable run as a
-control is narrative-building.
+**回顾性对照。** 调查早期的一次运行可能已经变化了假设的触发条件——可用，但要说明它并非被设计为对照，并按标准衡量它：它必须与失败配置 **仅在一个变量上** 不同。把多变量运行重新解释成对照，是叙事构建。
 
 ---
 
-## Breaking a stuck investigation
+## 打破僵局
 
-The dominant failure is not misunderstanding CUDA — it is a context that has
-accumulated in favor of the incumbent theory and reads every new observation
-through it. Two interventions, in cost order:
+主导性失败不是不理解 CUDA——而是一个已经累积了有利于在位理论语境的上下文，并通过它来解读每一个新观察。两个干预手段，按成本排序：
 
-**1. Fresh-context adversarial review (cheap, do first).** Open a new session;
-paste the *evidence only* — dumps, repro, observations — with the theory and
-trajectory stripped out. Ask for the two or three candidate mechanisms and the
-cheapest experiment that discriminates between them. Models reliably fix errors
-presented as external input while failing to fix the same errors in their own
-output; asking the same session "are you sure?" does not work.
+**1. 新语境的对抗性审查（便宜，先做）。** 开一个新会话；只贴 *证据*——dump、复现脚本、观察——剥离理论和轨迹。请它给出两三个候选机制，以及最能区分它们的最便宜实验。模型在修复"作为外部输入呈现的错误"上可靠有效，却无法修复自己输出里的同样错误；问同一个会话"你确定吗？"不起作用。
 
-**2. Fan out at the commitment boundary (expensive, use sparingly).** Before a
-theory consumes real implementation effort, spawn 3–5 **isolated subagents**,
-each given only the ledger's *Observed* column and the repro command — no
-theories, no history, no sibling output. Each returns only
-`(hypothesis, cheapest discriminating experiment, predicted observation)`; no
-patches. Do not let branches see each other's output and do not have a model
-judge between them — peer exchange produces conformity, and the most fluent
-narrative wins a judged comparison regardless of correctness. **You** run the
-experiments; the hardware selects. Role-playing the branches inside one session
-is not fan-out — a single context produces five variations of its incumbent
-theory.
+**2. 在承诺边界扇出（昂贵，慎用）。** 在一个理论消耗真正的实现努力之前，派生出 3–5 个 **相互隔离的子代理**，每个只给 ledger 的 *Observed* 栏和复现命令——没有理论、没有历史、没有兄弟输出。每个只返回 `(假设, 最便宜的判别实验, 预测观察)`；不打补丁。不要让分支看到彼此的输出，也不要让某个模型在它们之间裁决——同侪交流产生趋同，而在被裁决的比较中，最流利的叙事总是赢，无论对错。**你** 来运行实验；硬件来做选择。在同一个会话里扮演多个分支不是扇出——单一上下文只会产出在位理论的五个变体。
 
 ---
 
-## Stop conditions
+## 停止条件
 
-Escalate to a human, or restart from the evidence, when any of these hold:
+当以下任一成立时，升级给人类，或从证据重新开始：
 
-- Two fixes built on a theory have failed.
-- The theory survives only by reconciling counter-observations. Count them;
-  three is too many.
-- The last three experiment cycles (edit-compile-run rounds that could have
-  produced a discriminating result) checked no falsifiable prediction.
-- The next step requires trusting trap-time evidence about a mechanism no
-  Tier 1/2 observation supports.
+- 基于同一理论的两个修复均已失败。
+- 理论只能靠调适反观察来存活。数一数；三个就太多了。
+- 最近三轮实验周期（本可产出判别结果的 编辑-编译-运行 轮次）没有检查任何可证伪的预测。
+- 下一步需要信任关于某个机制、而该机制没有任何层级 1/2 观察支撑的陷阱时刻证据。
 
 ---
 
-## Recording
+## 记录
 
-Keep the ledger at `agent_space/ledger_<bug-slug>.md` — one file per bug,
-appended as results land, alongside the raw artifacts it cites. It is what
-makes "how many rescues has this theory needed" answerable. Shape:
+把 ledger 保存在 `agent_space/ledger_<bug-slug>.md`——一个 bug 一个文件，结果随到随追加，与它引用的原始工件放一起。正是它让"这个理论已经被挽救多少次了"可以回答。格式：
 
 ```markdown
 # fp16 mismatch, local attention hdim64 — ledger
@@ -282,24 +153,11 @@ Status:        CONFIRMED — set shifted exactly with the tile edge (diff_n64.lo
 Rescues:       0
 ```
 
-(The illustration in "The one rule" shows this table catching a falsified
-theory; this one shows a confirmation earned by a discriminating prediction.
-Both cost minutes.)
+（"唯一规则"一节的示例展示了这张表抓住一个被证伪的理论；这个例子展示的是靠一个有区分力的预测挣来的确认。两者都只需几分钟。）
 
-In the final report or commit message:
+在最终报告或提交信息中：
 
-- Lead with the two statuses stated separately: `Status: FIXED` (N runs, cache
-  cleared, baseline established) and `Mechanism: ESTABLISHED` (confirming
-  prediction cited) or `Mechanism: OPEN`. Usually only the first is true. A
-  report may stay at `Mechanism: OPEN` indefinitely; promotion costs a checked
-  prediction, not a landed fix.
-- State unproven mechanisms **as hypotheses**, naming the experiment that would
-  settle each one.
-- **Record the wrong turns.** A report that presents only the final theory
-  teaches the next reader the answer was obvious, and destroys the information
-  about which evidence was misleading — the most reusable part of the
-  investigation.
-- **Audit the lesson itself.** Post-mortems can repeat the fallacy one level
-  up — first drafts reliably do. Give the report the same fresh-context review
-  as the investigation. And do not overcorrect into discarding an evidence
-  class: trap-time data is insufficient alone, not useless.
+- 开头把两个状态分开陈述：`Status: FIXED`（N 次运行、缓存已清、基线已确立）与 `Mechanism: ESTABLISHED`（引用确认性预测）或 `Mechanism: OPEN`。通常只有前者为真。一份报告可以无限期停留在 `Mechanism: OPEN`；晋升需要的是已验证的预测，而不是落地的修复。
+- 把未证实的机制 **作为假设** 陈述，并命名能一锤定音的实验。
+- **记录走过的弯路。** 只呈现最终理论的报告会让下一个读者以为答案显而易见，并销毁关于哪些证据具有误导性的信息——而这正是调查中最可复用的部分。
+- **审计教训本身。** 事后复盘会在更高一层重复同样的谬误——初稿几乎必然如此。给报告与调查相同的"新语境审查"。也不要矫枉过正到丢弃某一类证据：陷阱时刻数据单独使用不充分，但并非无用。

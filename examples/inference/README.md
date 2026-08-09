@@ -1,3 +1,3 @@
-# Example of LLM inference using FlashAttention
+# 使用 FlashAttention 的 LLM 推理示例
 
-Example script of using FlashAttention for inference coming soon.
+使用 FlashAttention 做推理的示例脚本即将推出。

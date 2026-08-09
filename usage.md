@@ -1,126 +1,92 @@
-# FlashAttention adoption
+# FlashAttention 应用情况
 
-We've been very happy to see FlashAttention being adopted by many organizations
-and research labs to speed up their training / inference.
-This page contains a partial list of places where FlashAttention is being used.
-If you'd like to add links to your organization / product / codebase, please open a
-PR or email us. We'd very much like to hear from you!
+我们很高兴看到 FlashAttention 被许多组织和研究实验室采用，以加速他们的训练 / 推理。
+本页面列出了部分正在使用 FlashAttention 的地方。
+如果你希望添加你的组织 / 产品 / 代码库的链接，请提交 PR 或给我们发邮件。我们非常期待听到你的消息！
 
-## Integrated into machine learning frameworks
+## 已集成到机器学习框架
 
-- Pytorch: [integrated](https://github.com/pytorch/pytorch/pull/81434) into core Pytorch in nn.Transformer.
+- Pytorch：[集成](https://github.com/pytorch/pytorch/pull/81434) 到核心 Pytorch 的 nn.Transformer 中。
 
-- Huggingface's [transformers](https://github.com/huggingface/transformers) library.
-  [On-going](https://github.com/huggingface/transformers/pull/18439), blogpost
-  coming soon.
+- Huggingface 的 [transformers](https://github.com/huggingface/transformers) 库。
+  [进行中](https://github.com/huggingface/transformers/pull/18439)，博客文章即将发布。
 
-- Microsoft's [DeepSpeed](https://github.com/microsoft/DeepSpeed):
-  FlashAttention is [integrated](https://github.com/microsoft/DeepSpeed/blob/ec13da6ba7cabc44bb4745a64a208b8580792954/deepspeed/ops/transformer/inference/triton_ops.py) into DeepSpeed's inference engine.
+- 微软的 [DeepSpeed](https://github.com/microsoft/DeepSpeed)：
+  FlashAttention 被[集成](https://github.com/microsoft/DeepSpeed/blob/ec13da6ba7cabc44bb4745a64a208b8580792954/deepspeed/ops/transformer/inference/triton_ops.py)到 DeepSpeed 的推理引擎中。
 
-- Nvidia's [Megatron-LM](https://github.com/NVIDIA/Megatron-LM/pull/267). This
-  library is a popular framework on training large transformer language models at scale.
+- Nvidia 的 [Megatron-LM](https://github.com/NVIDIA/Megatron-LM/pull/267)。这个库是训练大规模 Transformer 语言模型的主流框架。
 
-- MosaicML [Composer](https://github.com/mosaicml/composer)
-  [library](https://www.mosaicml.com/blog/gpt-3-quality-for-500k). Composer is a
-  library for efficient neural network training.
-  
-- EleutherAI's [GPT-NeoX](https://github.com/EleutherAI/gpt-neox/pull/725). This is a research library for training large language transformer models at scale based on NVIDIA's Megatron-LM and Microsoft's DeepSpeed.
+- MosaicML [Composer](https://github.com/mosaicml/composer) [库](https://www.mosaicml.com/blog/gpt-3-quality-for-500k)。Composer 是一个用于高效神经网络训练的库。
 
-- PaddlePaddle: integrated into the framework with [API](https://github.com/PaddlePaddle/Paddle/blob/develop/python/paddle/nn/functional/flash_attention.py) `paddle.nn.functional.flash_attention`.
+- EleutherAI 的 [GPT-NeoX](https://github.com/EleutherAI/gpt-neox/pull/725)。这是一个基于 Nvidia 的 Megatron-LM 和微软的 DeepSpeed、用于大规模训练 Transformer 语言模型的研究库。
 
-## MLPerf benchmarks
+- PaddlePaddle：通过 [API](https://github.com/PaddlePaddle/Paddle/blob/develop/python/paddle/nn/functional/flash_attention.py) `paddle.nn.functional.flash_attention` 集成到框架中。
 
-[MLPerf](https://mlcommons.org/en/) is a competitive machine learning performance benchmark. FlashAttention
-yields the fastest BERT training on cloud instances in MLPerf training 2.0 (June
-2022) and MLPerf training 2.1 (November 2022).
+## MLPerf 基准测试
 
-- MLPerf 2.0: [IEEE Spectrum](https://spectrum.ieee.org/mlperf-rankings-2022) and [Forbes](ttps://www.forbes.com/sites/moorinsights/2022/07/12/google-dethrones-nvidia-in-latest-artificial-intelligence-benchmarking-tests/) articles about our submission to the MLPerf 2.0 benchmark using FlashAttention.
+[MLPerf](https://mlcommons.org/en/) 是一个竞争性的机器学习性能基准。FlashAttention
+在 MLPerf 训练 2.0（2022 年 6 月）和 MLPerf 训练 2.1（2022 年 11 月）中取得了云端实例上最快的 BERT 训练。
 
-- MLPerf 2.1 -
-  collaboration
-  between [Azure and Hazy Research](https://techcommunity.microsoft.com/t5/azure-high-performance-computing/azure-collaborates-with-hazy-research-and-nvidia-to-achieve/ba-p/3667511): for the first time, we can train MLPerf BERT
-  in under 2 minutes on 16 nodes.
+- MLPerf 2.0：[IEEE Spectrum](https://spectrum.ieee.org/mlperf-rankings-2022) 和 [Forbes](https://www.forbes.com/sites/moorinsights/2022/07/12/google-dethrones-nvidia-in-latest-artificial-intelligence-benchmarking-tests/) 关于我们使用 FlashAttention 参加 MLPerf 2.0 基准测试的文章。
 
-- MLPerf 2.1 -
-  [Nvidia](https://developer.nvidia.com/blog/leading-mlperf-training-2-1-with-full-stack-optimizations-for-ai/):
-  Nvidia uses techniques from FlashAttention to make their (already extremely optimized) BERT
-  implementation go even faster.
+- MLPerf 2.1 - [Azure 与 Hazy Research 的合作](https://techcommunity.microsoft.com/t5/azure-high-performance-computing/azure-collaborates-with-hazy-research-and-nvidia-to-achieve/ba-p/3667511)：首次在 16 个节点上不到 2 分钟训练完 MLPerf BERT。
 
-- MLPerf 2.1 - [MosaicML](https://www.mosaicml.com/blog/mlperf-nlp-nov2022): FlashAttention
-  helps train BERT 2.7x faster in the open division.
+- MLPerf 2.1 - [Nvidia](https://developer.nvidia.com/blog/leading-mlperf-training-2-1-with-full-stack-optimizations-for-ai/)：
+  Nvidia 使用 FlashAttention 的技术，让他们（已经高度优化的）BERT 实现更快。
 
-## Language model training & inference
+- MLPerf 2.1 - [MosaicML](https://www.mosaicml.com/blog/mlperf-nlp-nov2022)：FlashAttention
+  帮助在开放组（open division）中将 BERT 训练加速 2.7 倍。
 
-- [PubMedGPT 2.7B](https://crfm.stanford.edu/2022/12/15/pubmedgpt.html), a
-  domain-specific LLM for biomedicine, by Stanford CRFM, trained on
-  [MosaicML](https://www.mosaicml.com/blog/introducing-pubmed-gpt) Cloud. Just
-  using FlashAttention nearly halves the total training time.
+## 语言模型训练与推理
 
-- Meta's
-  [AITemplate](https://ai.facebook.com/blog/gpu-inference-engine-nvidia-amd-open-source/)
-  uses FlashAttention as part of their approach to speed up Transformer
-  inference (up to 5.3x on BERT).
+- [PubMedGPT 2.7B](https://crfm.stanford.edu/2022/12/15/pubmedgpt.html)，斯坦福 CRFM 针对生物医学领域训练的
+  领域专用 LLM，在 [MosaicML](https://www.mosaicml.com/blog/introducing-pubmed-gpt) 云上训练。
+  仅使用 FlashAttention 就几乎将总训练时间减半。
 
-- Nvidia's [FasterTransformer](https://github.com/NVIDIA/FasterTransformer) is a
-  state-of-the-art Transformer inference library. As of version
-  [5.2](https://github.com/NVIDIA/FasterTransformer/commit/b672f49e256ba7a2d4fc9691d270b60b7fc1a2ff),
-  FlashAttention is used as a component of FasterTransformer to speed up GPT inference.
+- Meta 的 [AITemplate](https://ai.facebook.com/blog/gpu-inference-engine-nvidia-amd-open-source/)
+  将 FlashAttention 作为其加速 Transformer 推理方案的一部分（在 BERT 上最高 5.3 倍）。
 
-- [Kernl](https://github.com/ELS-RD/kernl) is a library for fast Transformer
-  inference. They use FlashAttention as part of their
-  [approach](https://twitter.com/pommedeterre33/status/1585284221014245377) to
-  speed up Transformers by up to 12x.
+- Nvidia 的 [FasterTransformer](https://github.com/NVIDIA/FasterTransformer) 是最先进的 Transformer
+  推理库。从版本 [5.2](https://github.com/NVIDIA/FasterTransformer/commit/b672f49e256ba7a2d4fc9691d270b60b7fc1a2ff)
+  开始，FlashAttention 被用作 FasterTransformer 的组件来加速 GPT 推理。
 
-## Diffusion model training and inference
+- [Kernl](https://github.com/ELS-RD/kernl) 是一个快速 Transformer 推理库。他们把 FlashAttention 作为
+  其[方案](https://twitter.com/pommedeterre33/status/1585284221014245377)的一部分，
+  将 Transformer 加速最高 12 倍。
 
-- Huggingface's [diffusers](https://github.com/huggingface/diffusers) library
-  for diffusion models. FlashAttention is integrated into [diffusers
-  v0.7.0](https://github.com/huggingface/diffusers/releases/tag/v0.7.0).
-  Up to 2x faster inference and lower memory usage.
+## 扩散模型训练与推理
 
-- Colossal-AI's
-  [implementation](https://github.com/hpcaitech/ColossalAI/tree/main/examples/images/diffusion)
-  of Stable Diffusion: with FlashAttention as one of its components, it speeds up
-  pretraining by up to 6.5x, and reduces the hardware cost of fine-tuning by 7x.
+- Huggingface 的 [diffusers](https://github.com/huggingface/diffusers) 扩散模型库。FlashAttention 被集成到 [diffusers v0.7.0](https://github.com/huggingface/diffusers/releases/tag/v0.7.0) 中。
+  推理最高提速 2 倍，且内存占用更低。
 
-- Meta's
-  [AITemplate](https://ai.facebook.com/blog/gpu-inference-engine-nvidia-amd-open-source/)
-  with FlashAttention one of the components, is currently the [fastest](https://twitter.com/bing_xu_/status/1590447334055632897) Stable
-  Diffusion inference engine that we know of.
+- Colossal-AI 的 Stable Diffusion [实现](https://github.com/hpcaitech/ColossalAI/tree/main/examples/images/diffusion)：
+  以 FlashAttention 作为组件之一，预训练最高提速 6.5 倍，并将微调的硬件成本降低 7 倍。
 
-- Stable Diffusion inference from
-  [Labml.ai](https://twitter.com/labmlai/status/1573634095732490240): 50% speedup.
+- Meta 的 [AITemplate](https://ai.facebook.com/blog/gpu-inference-engine-nvidia-amd-open-source/)，
+  以 FlashAttention 作为组件之一，据我们所知是目前[最快](https://twitter.com/bing_xu_/status/1590447334055632897)
+  的 Stable Diffusion 推理引擎。
 
-- Our own Stable Diffusion [fork](https://twitter.com/realDanFu/status/1580641495991754752) uses FlashAttention to get 3-4x speedup compared
-  to the original version.
+- [Labml.ai](https://twitter.com/labmlai/status/1573634095732490240) 的 Stable Diffusion 推理：加速 50%。
 
-## Other models
+- 我们自己的 Stable Diffusion [fork](https://twitter.com/realDanFu/status/1580641495991754752) 使用 FlashAttention，
+  相比原版获得 3-4 倍加速。
 
-- [Uni-Fold](https://github.com/dptech-corp/Uni-Fold): Uni-Fold is an
-  open-source platform for developing protein models beyond AlphaFold. With
-  FlashAttention, Uni-Fold is 2.6x
-  [faster](https://twitter.com/guolin_ke/status/1580532071901995008) than AlphaFold.
+## 其他模型
 
-- [OpenFold](https://github.com/aqlaboratory/openfold): a trainable,
-  memory-efficient, and GPU-friendly PyTorch reproduction of AlphaFold 2. With
-  FlashAttention as one of its
-  [components](https://twitter.com/gahdritz/status/1595420944880779266), it is
-  up to 3x faster than AlphaFold2 to run inference on short sequences, and can
-  predict 2x longer structures.
+- [Uni-Fold](https://github.com/dptech-corp/Uni-Fold)：Uni-Fold 是一个开源蛋白质模型开发平台，
+  超越 AlphaFold。使用 FlashAttention 后，Uni-Fold 比 AlphaFold [快](https://twitter.com/guolin_ke/status/1580532071901995008) 2.6 倍。
 
-## Different implementations
+- [OpenFold](https://github.com/aqlaboratory/openfold)：一个可训练、省内存且 GPU 友好的 AlphaFold 2 PyTorch 复现。
+  以 FlashAttention 作为[组件](https://twitter.com/gahdritz/status/1595420944880779266)之一，
+  在短序列推理上比 AlphaFold2 快最多 3 倍，并能预测长 2 倍的结构。
 
-- [Triton](https://github.com/openai/triton): an [implementation](https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py) of
-  FlashAttention in Triton by Phil Tillet from OpenAI. Triton is a Python-based
-  language and compiler for parallel programming.
+## 不同的实现
 
-- [xformers](https://github.com/facebookresearch/xformers): The xformers team
-  has implemented [memory-efficient
-  attention](https://twitter.com/fvsmassa/status/1580229170629849089) in a
-  similar spirit to FlashAttention.
-  xformers dynamically dispatches to whichever implementation is available / faster.
+- [Triton](https://github.com/openai/triton)：OpenAI 的 Phil Tillet 用 Triton 写的 FlashAttention [实现](https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py)。Triton 是一种基于 Python 的并行编程语言和编译器。
 
-- [Jax](https://github.com/google/jax): an [implementation](https://github.com/lucidrains/flash-attention-jax)
-  in Jax by [lucidrains](https://github.com/lucidrains/).
+- [xformers](https://github.com/facebookresearch/xformers)：xformers 团队以与 FlashAttention 相似的思路实现了[内存高效注意力](https://twitter.com/fvsmassa/status/1580229170629849089)。
+  xformers 会动态分派到可用 / 更快的实现。
 
-- [Metal](https://developer.apple.com/metal): an [implementation](https://github.com/philipturner/metal-flash-attention) in Metal by Philip Turner. This ports FlashAttention to mobile GPU architectures such as Apple silicon.
+- [Jax](https://github.com/google/jax)：[lucidrains](https://github.com/lucidrains/) 用 Jax 写的[实现](https://github.com/lucidrains/flash-attention-jax)。
+
+- [Metal](https://developer.apple.com/metal)：Philip Turner 用 Metal 写的[实现](https://github.com/philipturner/metal-flash-attention)。这个实现把 FlashAttention 移植到 Apple silicon 等移动 GPU 架构。

@@ -1,145 +1,145 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code（claude.ai/code）在此代码库中工作时提供指导。
 
-## Project Overview
+## 项目概述
 
-FlashAttention-4 (FA4) — fast, memory-efficient exact attention kernels written in Python using CuTeDSL (NVIDIA CUTLASS DSL). Kernels are compiled to PTX/CUBIN at runtime. Targets Hopper (SM90) and Blackwell (SM100/SM110) GPUs. Package name: `flash-attn-4`.
+FlashAttention-4（FA4）——用 Python 编写的快速、内存高效的精确注意力 kernel，基于 CuTeDSL（NVIDIA CUTLASS DSL）。Kernel 在运行时编译为 PTX/CUBIN。目标 GPU 为 Hopper（SM90）和 Blackwell（SM100/SM110）。包名：`flash-attn-4`。
 
-The repository also contains older generations (FA2 in top-level `csrc/`, FA3 in `hopper/`) but active development is on FA4 in `flash_attn/cute/`.
+本仓库还包含旧代实现（顶层 `csrc/` 中的 FA2、`hopper/` 中的 FA3），但当前活跃开发集中在 `flash_attn/cute/` 下的 FA4。
 
-## Agent Scratch Space
+## Agent 草稿空间
 
-Use `agent_space/` for project-local scratch work such as lab notes, profiling outputs, temporary repro scripts, and experiment artifacts. Treat it as disposable workspace rather than product code.
+使用 `agent_space/` 存放项目内的临时草稿，例如实验笔记、性能分析输出、临时复现脚本和实验产物。把它当作一次性工作区，而不是产品代码。
 
-## Build & Install
+## 构建与安装
 
 ```bash
 pip install flash-attn-4
-# or dev install:
+# 或开发安装：
 pip install -e "flash_attn/cute[dev]"
 ```
 
-Dependencies: `nvidia-cutlass-dsl>=4.5.2`, `torch`, `einops`, `apache-tvm-ffi`, `quack-kernels>=0.5.0`.
+依赖：`nvidia-cutlass-dsl>=4.5.2`、`torch`、`einops`、`apache-tvm-ffi`、`quack-kernels>=0.5.0`。
 
-## Running Tests
+## 运行测试
 
 ```bash
 pytest tests/cute/test_flash_attn.py
-pytest tests/cute/test_flash_attn.py -k "test_flash_attn_output" -x  # single test
+pytest tests/cute/test_flash_attn.py -k "test_flash_attn_output" -x  # 单个测试
 pytest tests/cute/test_flash_attn_varlen.py
 pytest tests/cute/test_mask_mod.py
 pytest tests/cute/test_score_mod.py
 pytest tests/cute/test_block_sparsity.py
 ```
 
-### Fast two-pass testing
+### 快速两遍测试法
 
-Compilation dominates test time. The fast workflow separates compilation (parallel, no GPU needed) from execution (uses cached binaries):
+编译主导了测试时间。快速工作流把编译（并行、无需 GPU）与执行（使用缓存二进制）分开：
 
 ```bash
-# Pass 1: compile all kernels in parallel using FakeTensorMode (no GPU memory allocation)
+# 第一遍：使用 FakeTensorMode 并行编译所有 kernel（不分配 GPU 内存）
 FLASH_ATTENTION_FAKE_TENSOR=1 FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1 pytest -n 64 -x tests/cute/test_flash_attn.py
 
-# Pass 2: run tests using cached compiled kernels
+# 第二遍：使用缓存的已编译 kernel 运行测试
 FLASH_ATTENTION_FAKE_TENSOR=0 FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1 pytest -x tests/cute/test_flash_attn.py
 ```
 
-- `FLASH_ATTENTION_FAKE_TENSOR=1` — uses PyTorch FakeTensorMode to compile kernels without allocating GPU memory or running them.
-- `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1` — enables persistent disk cache at `/tmp/${USER}/flash_attention_cute_dsl_cache/`.
-- `-n 256` — pytest-xdist parallel workers (only useful in the compilation pass).
+- `FLASH_ATTENTION_FAKE_TENSOR=1` — 使用 PyTorch FakeTensorMode 编译 kernel，不分配 GPU 内存、不真正运行。
+- `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1` — 在 `/tmp/${USER}/flash_attention_cute_dsl_cache/` 启用持久化磁盘缓存。
+- `-n 256` — pytest-xdist 并行 worker（仅在编译一遍中有用）。
 
-Tests are parametrized over dtype (fp16/bf16), head dimension (64, 96, 128), sequence length, causal/non-causal, and MHA/GQA/MQA.
+测试按 dtype（fp16/bf16）、head 维度（64、96、128）、序列长度、causal/非 causal 以及 MHA/GQA/MQA 参数化。
 
-If you get OOM errors running tests or benchmarks, use `nvidia-smi` to find a free GPU and select it with `CUDA_VISIBLE_DEVICES=<id>`.
+如果运行测试或基准时出现 OOM 错误，用 `nvidia-smi` 找一块空闲 GPU，并用 `CUDA_VISIBLE_DEVICES=<id>` 选择它。
 
-## Linting
+## 代码检查（Linting）
 
-Pre-commit uses ruff on `flash_attn/cute/` files. Large kernel files (`flash_bwd.py`, `flash_fwd.py`, `flash_fwd_sm100.py`, `interface.py`) are excluded from auto-formatting.
+Pre-commit 对 `flash_attn/cute/` 下的文件使用 ruff。大型 kernel 文件（`flash_bwd.py`、`flash_fwd.py`、`flash_fwd_sm100.py`、`interface.py`）被排除在自动格式化之外。
 
 ```bash
 ruff check flash_attn/cute/ --fix
 ruff format flash_attn/cute/
 ```
 
-## Code Architecture
+## 代码架构
 
-### Public API (`flash_attn/cute/interface.py`)
+### 公共 API（`flash_attn/cute/interface.py`）
 
-Two entry points exported from `flash_attn/cute/__init__.py`:
-- `flash_attn_func(q, k, v, ...)` — standard attention
-- `flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, ...)` — variable-length
+从 `flash_attn/cute/__init__.py` 导出的两个入口：
+- `flash_attn_func(q, k, v, ...)` — 标准注意力
+- `flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, ...)` — 变长序列
 
-Key parameters: `causal`, `window_size_left/right`, `softmax_scale`, `softcap`, `score_mod`, `mask_mod`, `block_sparse_tensors`, `num_splits`, `pack_gqa`, `m_block_size`, `n_block_size`, `num_threads`.
+关键参数：`causal`、`window_size_left/right`、`softmax_scale`、`softcap`、`score_mod`、`mask_mod`、`block_sparse_tensors`、`num_splits`、`pack_gqa`、`m_block_size`、`n_block_size`、`num_threads`。
 
-Tensor layout: `(batch, seqlen, num_heads, head_dim)`, last dim contiguous, 16-byte aligned.
+张量布局：`(batch, seqlen, num_heads, head_dim)`，最后一维连续、16 字节对齐。
 
-### Forward Kernels
+### 前向 Kernel
 
-- `flash_fwd.py` — `FlashAttentionForwardSm90`: Hopper forward. No SplitKV or paged KV.
-- `flash_fwd_sm100.py` — `FlashAttentionForwardSm100`: Blackwell forward. Full features including SplitKV, paged KV cache, persistent kernels, 2CTA instructions.
-- `flash_fwd_combine.py` — `FlashAttentionForwardCombine`: merges SplitKV partial results.
+- `flash_fwd.py` — `FlashAttentionForwardSm90`：Hopper 前向。无 SplitKV 或 paged KV。
+- `flash_fwd_sm100.py` — `FlashAttentionForwardSm100`：Blackwell 前向。完整特性，包括 SplitKV、paged KV cache、持久化 kernel、2CTA 指令。
+- `flash_fwd_combine.py` — `FlashAttentionForwardCombine`：合并 SplitKV 的部分结果。
 
-### Backward Kernels
+### 反向 Kernel
 
-- `flash_bwd.py` — `FlashAttentionBackwardSm80`: Ampere backward (base).
-- `flash_bwd_sm90.py` — `FlashAttentionBackwardSm90`: Hopper backward.
-- `flash_bwd_sm100.py` — `FlashAttentionBackwardSm100`: Blackwell backward with 2CTA and block sparse support.
-- `flash_bwd_preprocess.py` / `flash_bwd_postprocess.py` — auxiliary backward kernels.
+- `flash_bwd.py` — `FlashAttentionBackwardSm80`：Ampere 反向（基础版）。
+- `flash_bwd_sm90.py` — `FlashAttentionBackwardSm90`：Hopper 反向。
+- `flash_bwd_sm100.py` — `FlashAttentionBackwardSm100`：Blackwell 反向，支持 2CTA 和 block sparse。
+- `flash_bwd_preprocess.py` / `flash_bwd_postprocess.py` — 辅助反向 kernel。
 
-### Core Abstractions
+### 核心抽象
 
-- `softmax.py` — Online softmax with row_max/row_sum tracking, score modifier support.
-- `mask.py` — `AttentionMask`: causal, local/sliding window, block sparse, mask_mod application.
-- `block_info.py` — `BlockInfo`: tile dimensions, n/m block range computation for causal/local masking.
-- `seqlen_info.py` — `SeqlenInfoQK`: sequence length and offset tracking for varlen.
-- `pipeline.py` — `PipelineStateSimple`: circular buffer index/phase management for pipelined loads.
-- `tile_scheduler.py` — Tile scheduling strategies (single tile, varlen-aware, persistent).
-- `copy_utils.py` — Type-converting copies, shared-to-register loads, TMA copy atoms.
-- `named_barrier.py` — Named barrier enums for warp synchronization.
+- `softmax.py` — 带 row_max/row_sum 追踪的 online softmax，支持 score modifier。
+- `mask.py` — `AttentionMask`：causal、局部/滑窗、block sparse、mask_mod 应用。
+- `block_info.py` — `BlockInfo`：tile 维度、causal/local masking 的 n/m block 范围计算。
+- `seqlen_info.py` — `SeqlenInfoQK`：varlen 的序列长度与偏移追踪。
+- `pipeline.py` — `PipelineStateSimple`：流水线加载的循环缓冲区索引/阶段管理。
+- `tile_scheduler.py` — tile 调度策略（单 tile、varlen 感知、持久化）。
+- `copy_utils.py` — 类型转换拷贝、shared 到 register 的加载、TMA 拷贝原子操作。
+- `named_barrier.py` — warp 同步的命名屏障枚举。
 
-### Architecture-Specific Helpers
+### 架构专属辅助
 
-- `hopper_helpers.py` — SM90 warp-group GEMM, shared memory layout creation, fence/commit/wait.
-- `blackwell_helpers.py` — SM100 UMMA-based GEMM, PTX-optimized paths, 2CTA support.
-- `mma_sm100_desc.py` — Hardware MMA descriptor enums (formats, saturation, scaling).
+- `hopper_helpers.py` — SM90 warp-group GEMM、shared memory 布局创建、fence/commit/wait。
+- `blackwell_helpers.py` — SM100 UMMA 的 GEMM、PTX 优化路径、2CTA 支持。
+- `mma_sm100_desc.py` — 硬件 MMA 描述符枚举（格式、饱和、缩放）。
 
-### Other Components
+### 其他组件
 
-- `pack_gqa.py` — Packs multiple Q heads per KV head for efficient GQA.
-- `paged_kv.py` — `PagedKVManager`: paged KV cache with TMA support.
-- `fast_math.py` — exp2 polynomial coefficients, softcap score_mod creation.
-- `utils.py` — Hash functions for compile cache keys, warp reductions, predicates.
-- `cache_utils.py` — JIT compilation cache management.
-- `cute_dsl_utils.py` — Patched `cute.compile` that optionally dumps SASS.
+- `pack_gqa.py` — 为高效 GQA 打包多个 Q head 到每个 KV head。
+- `paged_kv.py` — `PagedKVManager`：带 TMA 支持的 paged KV cache。
+- `fast_math.py` — exp2 多项式系数、softcap score_mod 创建。
+- `utils.py` — 编译缓存键的哈希函数、warp 归约、谓词。
+- `cache_utils.py` — JIT 编译缓存管理。
+- `cute_dsl_utils.py` — 打补丁的 `cute.compile`，可选择性导出 SASS。
 
-### Compilation & Caching
+### 编译与缓存
 
-Kernels are JIT-compiled. Cache key includes dtype, head_dim, causal, mask/score_mod hashes, architecture, block sizes. Caching levels: in-memory LRU + optional disk cache via `get_jit_cache()`.
+Kernel 是 JIT 编译的。缓存键包含 dtype、head_dim、causal、mask/score_mod 哈希、架构、block 大小。缓存层级：内存 LRU + 可选的磁盘缓存（通过 `get_jit_cache()`）。
 
-Env vars: `CUTE_CUBIN_PATH` (dump CUBIN/SASS), `CUTE_DSL_KEEP_PTX=1` (inspect PTX), `CUTE_DSL_PTXAS_PATH` (custom ptxas).
+环境变量：`CUTE_CUBIN_PATH`（导出 CUBIN/SASS）、`CUTE_DSL_KEEP_PTX=1`（检查 PTX）、`CUTE_DSL_PTXAS_PATH`（自定义 ptxas）。
 
-## Key Patterns
+## 关键模式
 
-- Compile-time constants use `cutlass.Constexpr[type]` for kernel specialization.
-- Score/mask modifiers are user-defined `@cute.jit` callables injected into the kernel at compile time.
-- Forward execution: load Q tile → loop over K/V blocks (pipelined) → online softmax accumulation → store O and LSE.
-- 2CTA instructions (SM100, hdim=128): both CTAs in a cluster coordinate via shared mbarriers; tx_count must be multiplied by `cta_group_size`.
+- 编译期常量使用 `cutlass.Constexpr[type]` 做 kernel 特化。
+- Score/mask modifier 是用户定义的 `@cute.jit` 可调用对象，在编译期注入 kernel。
+- 前向执行：加载 Q tile → 循环 K/V block（流水线）→ online softmax 累积 → 存储 O 和 LSE。
+- 2CTA 指令（SM100，hdim=128）：集群内两个 CTA 通过 shared mbarrier 协调；tx_count 必须乘以 `cta_group_size`。
 
-## Debugging GPU Kernels
+## 调试 GPU Kernel
 
-**Before proposing a root cause for any hang, deadlock, illegal-address trap, Xid fault, sanitizer report, or numerical mismatch that is not visible in the CuteDSL source, read `AI/DEBUG_METHODOLOGY.md` and follow its protocol** (falsifiable-prediction discipline, evidence tiers, fix-validation hygiene, hypothesis ledger in `agent_space/`).
+**在为任何在 CuteDSL 源码中不可见的挂起、死锁、非法地址陷阱、Xid 故障、sanitizer 报告或数值不匹配提出根因之前，先阅读 `AI/DEBUG_METHODOLOGY.md` 并遵循其协议**（可证伪预测的纪律、证据层级、修复验证卫生、`agent_space/` 中的假设台账）。
 
-Tactical docs in `AI/`:
-- `DEBUG_2CTA.md` — kernel hang/deadlock debugging (printf bisection, pipeline barrier analysis, 2CTA pitfalls).
-- `RACECHECK_TMA_HAZARD.md` — `compute-sanitizer` false positives with `cp.async.bulk` (repro scripts: `racecheck_repro_1d_*.py`).
-- `CLC_TRACE_DEBUG.md` — visualization of CLC scheduling (`parse_clc_log.py`).
-- `SASS_MMA_ANALYSIS.md` — dumping SASS and analyzing HGMMA instruction mix.
-- `SM90_BLOCK_SIZE_TUNING.md` — choosing tile sizes/MMA configs on Hopper (`sm90_config_search.py`).
-- `SM90_R2P_MASKING_SASS.md` — SASS-level analysis of R2P predicate masking in SM90 forward.
-- `VARLEN_PREPROCESS_TILE_BUG.md` — post-mortem: varlen preprocess tile-size mismatch and padded-offset layout.
+`AI/` 中的战术文档：
+- `DEBUG_2CTA.md` — kernel 挂起/死锁调试（printf 二分、pipeline barrier 分析、2CTA 陷阱）。
+- `RACECHECK_TMA_HAZARD.md` — 使用 `cp.async.bulk` 时 `compute-sanitizer` 的误报（复现脚本：`racecheck_repro_1d_*.py`）。
+- `CLC_TRACE_DEBUG.md` — CLC 调度的可视化（`parse_clc_log.py`）。
+- `SASS_MMA_ANALYSIS.md` — 导出 SASS 并分析 HGMMA 指令组合。
+- `SM90_BLOCK_SIZE_TUNING.md` — 在 Hopper 上选择 tile 大小/MMA 配置（`sm90_config_search.py`）。
+- `SM90_R2P_MASKING_SASS.md` — SM90 前向中 R2P 谓词掩码的 SASS 级分析。
+- `VARLEN_PREPROCESS_TILE_BUG.md` — 事后分析：varlen preprocess tile 大小不匹配与填充偏移布局。
 
-Key tools:
-- `cute.printf` with thread guards (`tidx % 32 == 0`, `elect_one()`) for targeted output
-- `compute-sanitizer --tool=racecheck` (beware false positives with raw TMA)
-- `CUTE_DSL_KEEP_PTX=1` and `CUTE_DSL_LINEINFO=1` for PTX inspection and sanitizer source mapping
+关键工具：
+- `cute.printf` 配合线程守卫（`tidx % 32 == 0`、`elect_one()`）做定向输出
+- `compute-sanitizer --tool=racecheck`（注意原始 TMA 的误报）
+- `CUTE_DSL_KEEP_PTX=1` 和 `CUTE_DSL_LINEINFO=1` 用于 PTX 检查与 sanitizer 源码映射
