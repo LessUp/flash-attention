@@ -1,6 +1,7 @@
 # Copyright (c) 2025, Tri Dao.
-# Ported Cutlass code from C++ to Python:
+# 从 C++ 移植到 Python 的 Cutlass 代码：
 # https://github.com/NVIDIA/cutlass/blob/main/include/cute/arch/mma_sm100_desc.hpp
+# https://github.com/NVIDIA/cutlass/blob/main/include/cute/atom/mma_traits_sm100.hpp
 # https://github.com/NVIDIA/cutlass/blob/main/include/cute/atom/mma_traits_sm100.hpp
 
 from enum import IntEnum
@@ -9,16 +10,16 @@ import cutlass
 import cutlass.cute as cute
 
 # ---------------------------------------------------------------------------
-# Enumerations that match the HW encodings (values MUST stay identical)
+# 与硬件编码一致的枚举（值必须保持完全一致）
 # ---------------------------------------------------------------------------
 
 
-class Major(IntEnum):  # matrix “layout” in the ISA docs
+class Major(IntEnum):  # 在 ISA 文档中称为矩阵 "layout"
     K = 0
     MN = 1
 
 
-class ScaleIn(IntEnum):  # negate flags
+class ScaleIn(IntEnum):  # 取负标志
     One = 0
     Neg = 1
 
@@ -28,13 +29,13 @@ class Saturate(IntEnum):
     True_ = 1
 
 
-class CFormat(IntEnum):  # 2-bit field (bits 4-5)
+class CFormat(IntEnum):  # 2 位字段（第 4-5 位）
     F16 = 0
     F32 = 1
     S32 = 2
 
 
-class F16F32Format(IntEnum):  # 3-bit field (A/B element type)
+class F16F32Format(IntEnum):  # 3 位字段（A/B 元素类型）
     F16 = 0
     BF16 = 1
     TF32 = 2
@@ -61,17 +62,17 @@ class MaxShift(IntEnum):
 
 
 # ---------------------------------------------------------------------------
-# CUTLASS-type → encoding helpers
+# CUTLASS 类型 → 编码辅助函数
 # ---------------------------------------------------------------------------
 
 
 def to_UMMA_format(cutlass_type) -> int:
     """
-    Map a CUTLASS scalar class to the 3-bit encoding for Matrix A/B.
+    把 CUTLASS 标量类映射到 Matrix A/B 的 3 位编码。
     """
     if cutlass_type is cutlass.Int8:
         return S8Format.INT8
-    # Unsigned 8-bit (if available in your CUTLASS build)
+    # 无符号 8 位（若你的 CUTLASS 构建支持）
     if cutlass_type is cutlass.Uint8:
         return S8Format.UINT8
     # FP-16 / BF-16
@@ -79,10 +80,10 @@ def to_UMMA_format(cutlass_type) -> int:
         return F16F32Format.F16
     if cutlass_type is cutlass.BFloat16:
         return F16F32Format.BF16
-    # TensorFloat-32 (8-bit exponent, 10-bit mantissa packed in 19 bits)
+    # TensorFloat-32（8 位指数、10 位尾数，打包在 19 位中）
     if cutlass_type is cutlass.TFloat32:
         return F16F32Format.TF32
-    # Float-8 / Float-6 / Float-4 – add whenever CUTLASS exposes them
+    # Float-8 / Float-6 / Float-4 —— CUTLASS 暴露时再补充
     if cutlass_type is cutlass.Float8E4M3FN:
         return MXF8F6F4Format.E4M3
     if cutlass_type is cutlass.Float8E5M2:
@@ -92,7 +93,7 @@ def to_UMMA_format(cutlass_type) -> int:
 
 def to_C_format(cutlass_type) -> int:
     """
-    Map a CUTLASS scalar class to the 2-bit accumulator encoding.
+    把 CUTLASS 标量类映射到 2 位累加器编码。
     """
     if cutlass_type is cutlass.Float16:
         return CFormat.F16
@@ -104,16 +105,16 @@ def to_C_format(cutlass_type) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The constructor – accepts only CUTLASS scalar classes
+# 构造函数 —— 只接受 CUTLASS 标量类
 # ---------------------------------------------------------------------------
 
 
 def make_instr_desc(
-    a_type,  # CUTLASS scalar class, e.g. cutlass.Int8
+    a_type,  # CUTLASS 标量类，例如 cutlass.Int8
     b_type,
     c_type,
-    M: int,  # 64, 128 or 256
-    N: int,  # 8 … 256 (multiple of 8)
+    M: int,  # 64、128 或 256
+    N: int,  # 8 … 256（8 的倍数）
     a_major: Major,
     b_major: Major,
     a_neg: ScaleIn = ScaleIn.One,
@@ -123,30 +124,33 @@ def make_instr_desc(
     max_shift: MaxShift = MaxShift.NoShift,
 ) -> int:
     """
-    Build the 32-bit instruction descriptor for Blackwell MMA.
-    All matrix/accumulator **types must be CUTLASS scalar classes** –
-    passing integers is forbidden.
+    构建 Blackwell MMA 的 32 位指令描述符。
+    所有矩阵/累加器 **类型必须是 CUTLASS 标量类** ——
+    禁止直接传整数。
     """
-    # --- encode element formats -------------------------------------------------
+    # 讲解：MMA 指令描述符把 A/B/C 的元素格式、维度、布局（行主/列主）、
+    # 饱和/取负等选项编码进一个 32 位字，UMMA 指令据此直接执行，
+    # 无需每次 GEMM 都重新配置 Tensor Core。
+    # --- 编码元素格式 -----------------------------------------------------------------
     a_fmt = int(to_UMMA_format(a_type))
     b_fmt = int(to_UMMA_format(b_type))
     c_fmt = int(to_C_format(c_type))
 
-    # --- range checks on M/N -----------------------------------------------------
+    # --- 对 M/N 做范围检查 -----------------------------------------------------------
     if M not in (64, 128, 256):
         raise ValueError("M must be 64, 128 or 256")
     if N < 8 or N > 256 or (N & 7):
         raise ValueError("N must be a multiple of 8 in the range 8…256")
 
-    m_dim = M >> 4  # 5-bit field
-    n_dim = N >> 3  # 6-bit field
+    m_dim = M >> 4  # 5 位字段
+    n_dim = N >> 3  # 6 位字段
 
     # fmt: off
     # --- pack the bit-fields -----------------------------------------------------
     desc = 0
-    desc |= (0                 & 0x3) << 0        # sparse_id2 (always 0 here)
+    desc |= (0                 & 0x3) << 0        # sparse_id2（此处恒为 0）
     desc |= (int(is_sparse)    & 0x1) << 2        # sparse_flag
-    desc |= (int(c_sat)        & 0x1) << 3        # saturate
+    desc |= (int(c_sat)        & 0x1) << 3        # saturate（饱和）
     desc |= (c_fmt             & 0x3) << 4        # c_format
     desc |= (a_fmt             & 0x7) << 7        # a_format
     desc |= (b_fmt             & 0x7) << 10       # b_format
@@ -154,12 +158,12 @@ def make_instr_desc(
     desc |= (int(b_neg)        & 0x1) << 14       # b_negate
     desc |= (int(a_major)      & 0x1) << 15       # a_major
     desc |= (int(b_major)      & 0x1) << 16       # b_major
-    desc |= (n_dim             & 0x3F) << 17      # n_dim (6 bits)
-    desc |= (m_dim             & 0x1F) << 24      # m_dim (5 bits)
-    desc |= (int(max_shift)    & 0x3) << 30       # max_shift (2 bits)
+    desc |= (n_dim             & 0x3F) << 17      # n_dim（6 位）
+    desc |= (m_dim             & 0x1F) << 24      # m_dim（5 位）
+    desc |= (int(max_shift)    & 0x3) << 30       # max_shift（2 位）
     # fmt: on
 
-    return desc & 0xFFFF_FFFF  # ensure 32-bit result
+    return desc & 0xFFFF_FFFF  # 确保 32 位结果
 
 
 def mma_op_to_idesc(op: cute.nvgpu.tcgen05.mma.MmaOp):
@@ -174,17 +178,17 @@ def mma_op_to_idesc(op: cute.nvgpu.tcgen05.mma.MmaOp):
     )
 
 
-class LayoutType(IntEnum):  # occupies the top-3 bits [61:64)
-    SWIZZLE_NONE = 0  # (a.k.a. “INTERLEAVE” in older docs)
+class LayoutType(IntEnum):  # 占据最高的 3 位 [61:64)
+    SWIZZLE_NONE = 0  # （旧文档中也称为 "INTERLEAVE"）
     SWIZZLE_128B_BASE32B = 1
     SWIZZLE_128B = 2
     SWIZZLE_64B = 4
     SWIZZLE_32B = 6
-    # values 3,5,7 are reserved / illegal for UMMA
+    # 值 3、5、7 对 UMMA 而言是保留/非法
 
 
 # ---------------------------------------------------------------------------
-#  Helpers – figure out the SWIZZLE_* family from the tensor layout
+#  辅助函数 —— 从张量布局确定 SWIZZLE_* 家族
 # ---------------------------------------------------------------------------
 
 
@@ -199,30 +203,30 @@ def _layout_type(swizzle: cute.Swizzle) -> LayoutType:
             1: LayoutType.SWIZZLE_32B,
             2: LayoutType.SWIZZLE_64B,
             3: LayoutType.SWIZZLE_128B,
-        }[B]  # KeyError ⇒ invalid B→ raise
-    if M == 5:  # Swizzle<2,5,2> (the only legal triple for M==5)
+        }[B]  # KeyError ⇒ B 非法 → 抛出异常
+    if M == 5:  # Swizzle<2,5,2>（M==5 唯一合法的三元组）
         if (B, S) != (2, 2):
             raise ValueError("Only Swizzle<2,5,2> supported for 128B_BASE32B")
         return LayoutType.SWIZZLE_128B_BASE32B
 
-    # Any other (M,B,S) triple is not a UMMA-legal shared-memory layout
+    # 任何其它 (M,B,S) 三元组都不是 UMMA 合法的共享内存布局
     raise ValueError("Unsupported swizzle triple for UMMA smem descriptor")
 
 
 def make_smem_desc_base(layout: cute.Layout, swizzle: cute.Swizzle, major: Major) -> int:
     """
-    Convert a 2-D *shared-memory* Cute layout into the Blackwell 64-bit
-    smem-descriptor, without the smem start address.
-    layout must correspond to layout of an uint128 tensor.
+    把 2-D *共享内存* Cute 布局转换为 Blackwell 64 位 smem 描述符，
+    不含 smem 起始地址。
+    layout 必须对应一个 uint128 张量的布局。
     """
     # ------------------------------------------------------------------ meta
-    layout_type = _layout_type(swizzle)  # resolve SWIZZLE_* family
+    layout_type = _layout_type(swizzle)  # 解析 SWIZZLE_* 家族
 
-    VERSION = 1  # bits 46–47
-    LBO_MODE = 0  # bit  52
-    BASE_OFFSET = 0  # bits 49–51   (CUTLASS always 0)
+    VERSION = 1  # 第 46-47 位
+    LBO_MODE = 0  # 第 52 位
+    BASE_OFFSET = 0  # 第 49-51 位（CUTLASS 恒为 0）
 
-    # ---------------------------------------------------------- strides  (units: uint128_t = 16 B)
+    # ---------------------------------------------------------- 步长（单位：uint128_t = 16 B）
     swizzle_atom_mn_size = {
         LayoutType.SWIZZLE_NONE: 1,
         LayoutType.SWIZZLE_32B: 2,
@@ -279,11 +283,11 @@ def make_smem_desc_base(layout: cute.Layout, swizzle: cute.Swizzle, major: Major
     # layout_type_         [61:64)
     desc |= (int(layout_type) & 0x7) << 61
 
-    return desc & 0xFFFF_FFFF_FFFF_FFFF  # force 64-bit width
+    return desc & 0xFFFF_FFFF_FFFF_FFFF  # 强制 64 位宽度
 
 
 def make_smem_desc_start_addr(start_addr: cute.Pointer) -> cutlass.Int32:
-    # 14 bits, remove 4 LSB (bits 0-13 in desc)
+    # 14 位，去掉 4 个最低有效位（desc 中的第 0-13 位）
     return (start_addr.toint() & 0x3FFFF) >> 4
 
 

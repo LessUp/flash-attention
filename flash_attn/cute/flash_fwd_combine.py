@@ -1,6 +1,6 @@
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_fwd_combine_kernel.h
-# from Cutlass C++ to Cute-DSL.
+# 从 Cutlass C++ 移植为 Cute-DSL 版本。
 import math
 from typing import Callable, Type, Optional
 from functools import partial
@@ -39,18 +39,18 @@ class FlashAttentionForwardCombine:
         stages: int = 4,
     ):
         """
-        Forward combine kernel for split attention computation.
+        SplitKV 前向合并（combine）内核：把 SplitKV 各 split 的部分结果合并为最终输出。
 
-        :param dtype: output data type
-        :param dtype_partial: partial accumulation data type
-        :param head_dim: head dimension
-        :param num_head: number of heads
-        :param tile_m: m block size
-        :param k_block_size: k block size
-        :param log_max_splits: log2 of maximum splits
-        :param num_threads: number of threads
-        :param varlen: whether using variable length sequences
-        :param stages: number of pipeline stages
+        :param dtype: 输出数据类型
+        :param dtype_partial: 部分累加（partial）结果的数据类型
+        :param head_dim: 注意力头维度（head_dim）
+        :param num_head: 头数
+        :param tile_m: M 方向（query 行）的块大小
+        :param k_block_size: K 方向（head_dim）的块大小
+        :param log_max_splits: 最大 split 数的 log2 值
+        :param num_threads: 线程数
+        :param varlen: 是否使用变长序列
+        :param stages: 流水线（pipeline）阶段数
         """
         self.dtype = dtype
         self.dtype_partial = dtype_partial
@@ -73,7 +73,7 @@ class FlashAttentionForwardCombine:
         log_max_splits,
         num_threads,
     ) -> bool:
-        """Check if the kernel can be implemented with the given parameters."""
+        """检查能否用给定参数实现该内核。"""
         if dtype not in [cutlass.Float16, cutlass.BFloat16, cutlass.Float32]:
             return False
         if dtype_partial not in [cutlass.Float16, cutlass.BFloat16, Float32]:
@@ -92,7 +92,7 @@ class FlashAttentionForwardCombine:
         return True
 
     def _setup_attributes(self):
-        # GMEM copy setup for O partial
+        # O_partial 的全局内存（gmem）拷贝设置
         universal_copy_bits = 128
         async_copy_elems = universal_copy_bits // self.dtype_partial.width
         assert self.k_block_size % async_copy_elems == 0
@@ -103,7 +103,7 @@ class FlashAttentionForwardCombine:
         gmem_threads_per_row = k_block_gmem // async_copy_elems
         assert self.num_threads % gmem_threads_per_row == 0
 
-        # Async copy atom for O partial load
+        # O_partial 加载用的异步拷贝原子（async copy atom）
         atom_async_copy_partial = cute.make_copy_atom(
             cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
             self.dtype_partial,
@@ -113,12 +113,12 @@ class FlashAttentionForwardCombine:
             (self.num_threads // gmem_threads_per_row, gmem_threads_per_row),
             order=(1, 0),
         )
-        vOpartial_layout = cute.make_layout((1, async_copy_elems))  # 4 vals per load
+        vOpartial_layout = cute.make_layout((1, async_copy_elems))  # 每次加载 4 个值
         self.gmem_tiled_copy_O_partial = cute.make_tiled_copy_tv(
             atom_async_copy_partial, tOpartial_layout, vOpartial_layout
         )
 
-        # GMEM copy setup for final O (use universal copy for store)
+        # 最终 O 的 gmem 拷贝设置（store 使用通用拷贝 universal copy）
         atom_universal_copy = cute.make_copy_atom(
             cute.nvgpu.CopyUniversalOp(),
             self.dtype,
@@ -127,11 +127,11 @@ class FlashAttentionForwardCombine:
         self.gmem_tiled_copy_O = cute.make_tiled_copy_tv(
             atom_universal_copy,
             tOpartial_layout,
-            vOpartial_layout,  # 4 vals per store
+            vOpartial_layout,  # 每次存储 4 个值
         )
 
-        # LSE copy setup with async copy (alignment = 1)
-        lse_copy_bits = Float32.width  # 1 element per copy, width is in bits
+        # LSE 的拷贝设置（使用异步拷贝，alignment = 1）
+        lse_copy_bits = Float32.width  # 每次拷贝 1 个元素，这里的 width 以比特（bit）为单位
         m_block_smem = (
             128
             if self.tile_m % 128 == 0
@@ -144,7 +144,7 @@ class FlashAttentionForwardCombine:
         gmem_threads_per_row_lse = m_block_smem
         assert self.num_threads % gmem_threads_per_row_lse == 0
 
-        # Async copy atom for LSE load
+        # LSE 加载用的异步拷贝原子
         atom_async_copy_lse = cute.make_copy_atom(
             cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.ALWAYS),
             Float32,
@@ -160,12 +160,12 @@ class FlashAttentionForwardCombine:
         )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Shared memory
+        # 共享内存（shared memory）
         # ///////////////////////////////////////////////////////////////////////////////
 
-        # Shared memory to register copy for LSE
+        # LSE 从共享内存到寄存器的拷贝
         self.smem_threads_per_col_lse = self.num_threads // m_block_smem
-        assert 32 % self.smem_threads_per_col_lse == 0  # Must divide warp size
+        assert 32 % self.smem_threads_per_col_lse == 0  # 必须整除 warp 大小
 
         s2r_layout_atom_lse = cute.make_ordered_layout(
             (self.smem_threads_per_col_lse, self.num_threads // self.smem_threads_per_col_lse),
@@ -177,8 +177,8 @@ class FlashAttentionForwardCombine:
             cute.make_layout(1),
         )
 
-        # LSE shared memory layout with swizzling to avoid bank conflicts
-        # This works for kBlockMSmem = 8, 16, 32, 64, 128, no bank conflicts
+        # LSE 的共享内存布局，使用 swizzle 以避免 bank 冲突
+        # 该 swizzle 对 kBlockMSmem = 8/16/32/64/128 均无 bank 冲突
         if const_expr(m_block_smem == 8):
             smem_lse_swizzle = cute.make_swizzle(5, 0, 5)
         elif const_expr(m_block_smem == 16):
@@ -192,7 +192,7 @@ class FlashAttentionForwardCombine:
             smem_layout_atom_lse, (self.max_splits, self.tile_m), (0, 1)
         )
 
-        # O partial shared memory layout (simple layout for pipeline stages)
+        # O_partial 的共享内存布局（为流水线阶段准备的简单布局）
         self.smem_layout_o = cute.make_ordered_layout(
             (self.tile_m, self.k_block_size, self.stages), order=(1, 0, 2)
         )
@@ -209,10 +209,10 @@ class FlashAttentionForwardCombine:
         num_splits_dynamic_ptr: Optional[cute.Tensor] = None,
         virtual_batch_idx: Optional[cute.Tensor] = None,
         semaphore_to_reset: Optional[cute.Tensor] = None,
-        # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
+        # 务必把 stream 放在最后一个参数（EnvStream：通过 TVM FFI 隐式获得）。
         stream: cuda.CUstream = None,
     ):
-        # Type checking
+        # 类型检查
         if const_expr(not (mO_partial.element_type == self.dtype_partial)):
             raise TypeError("O partial tensor must match dtype_partial")
         if const_expr(not (mO.element_type == self.dtype)):
@@ -222,7 +222,7 @@ class FlashAttentionForwardCombine:
         if const_expr(mLSE is not None and mLSE.element_type not in [Float32]):
             raise TypeError("LSE tensor must be Float32")
 
-        # Shape validation - input tensors are in user format, need to be converted to kernel format
+        # 形状校验——输入张量是用户格式，需转换成内核格式
         if const_expr(len(mO_partial.shape) not in [4, 5]):
             raise ValueError(
                 "O partial tensor must have 4 or 5 dimensions: (num_splits, batch, seqlen, nheads, headdim) or (num_splits, total_q, nheads, headdim)"
@@ -241,25 +241,27 @@ class FlashAttentionForwardCombine:
             )
 
         mO_partial, mO = [assume_tensor_aligned(t) for t in (mO_partial, mO)]
+        # O_partial 布局转置（用户格式 -> 内核格式）：
         # (num_splits, b, seqlen, h, d) -> (seqlen, d, num_splits, h, b)
-        # or (num_splits, total_q, h, d) -> (total_q, d, num_splits, h)
+        # 或 (num_splits, total_q, h, d) -> (total_q, d, num_splits, h)
         O_partial_layout_transpose = (
             [2, 4, 0, 3, 1] if const_expr(cu_seqlens is None) else [1, 3, 0, 2]
         )
-        # (b, seqlen, h, d) -> (seqlen, d, h, b) or (total_q, h, d) -> (total_q, d, h)
+        # O 布局转置：(b, seqlen, h, d) -> (seqlen, d, h, b)，或 (total_q, h, d) -> (total_q, d, h)
         mO_partial = cute.make_tensor(
             mO_partial.iterator, cute.select(mO_partial.layout, mode=O_partial_layout_transpose)
         )
         O_layout_transpose = [1, 3, 2, 0] if const_expr(cu_seqlens is None) else [0, 2, 1]
         mO = cute.make_tensor(mO.iterator, cute.select(mO.layout, mode=O_layout_transpose))
+        # LSE_partial 布局转置：
         # (num_splits, b, seqlen, h) -> (seqlen, num_splits, h, b)
-        # or (num_splits, total_q, h) -> (total_q, num_splits, h)
+        # 或 (num_splits, total_q, h) -> (total_q, num_splits, h)
         LSE_partial_layout_transpose = [2, 0, 3, 1] if const_expr(cu_seqlens is None) else [1, 0, 2]
         mLSE_partial = cute.make_tensor(
             mLSE_partial.iterator,
             cute.select(mLSE_partial.layout, mode=LSE_partial_layout_transpose),
         )
-        # (b, seqlen, h) -> (seqlen, h, b) or (total_q, h) -> (total_q, h)
+        # LSE 布局转置：(b, seqlen, h) -> (seqlen, h, b)，或 (total_q, h) -> (total_q, h)
         LSE_layout_transpose = [1, 2, 0] if const_expr(cu_seqlens is None) else [0, 1]
         mLSE = (
             cute.make_tensor(mLSE.iterator, cute.select(mLSE.layout, mode=LSE_layout_transpose))
@@ -267,7 +269,7 @@ class FlashAttentionForwardCombine:
             else None
         )
 
-        # Determine if we have variable length sequences
+        # 判断是否为变长序列（varlen）场景
         varlen = const_expr(cu_seqlens is not None or seqused is not None)
 
         self._setup_attributes()
@@ -284,7 +286,7 @@ class FlashAttentionForwardCombine:
 
         smem_size = SharedStorage.size_in_bytes()
 
-        # Grid dimensions: (ceil_div(seqlen, m_block), ceil_div(head_dim, k_block), num_head * batch)
+        # 网格（grid）维度：(ceil_div(seqlen, m_block), ceil_div(head_dim, k_block), num_head * batch)
         seqlen = mO_partial.shape[0]
         num_head = mO_partial.shape[3]
         batch_size = (
@@ -293,7 +295,7 @@ class FlashAttentionForwardCombine:
             else Int32(cu_seqlens.shape[0] - 1)
         )
 
-        # Create FastDivmodDivisor objects for efficient division
+        # 创建 FastDivmodDivisor 对象，用于高效的除法/取模运算
         seqlen_divmod = FastDivmodDivisor(seqlen)
         head_divmod = FastDivmodDivisor(num_head)
 
@@ -375,13 +377,13 @@ class FlashAttentionForwardCombine:
         tile_sched_params: ParamsBase,
         TileScheduler: cutlass.Constexpr[Callable],
     ):
-        # Thread and block indices
+        # 线程与块（block）索引
         tidx, _, _ = cute.arch.thread_idx()
         tile_scheduler = TileScheduler.create(tile_sched_params)
         work_tile = tile_scheduler.initial_work_tile_info()
         m_block, k_block, maybe_virtual_batch, _ = work_tile.tile_idx
 
-        # Map virtual batch index to real batch index (for persistent tile schedulers)
+        # 将虚拟 batch 索引映射为真实 batch 索引（用于 persistent tile scheduler）
         batch_idx = (
             virtual_batch_idx[maybe_virtual_batch]
             if const_expr(virtual_batch_idx is not None and not varlen)
@@ -389,7 +391,7 @@ class FlashAttentionForwardCombine:
         )
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Get shared memory buffer
+        # 获取共享内存缓冲区
         # ///////////////////////////////////////////////////////////////////////////////
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
@@ -397,7 +399,7 @@ class FlashAttentionForwardCombine:
         sMaxValidSplit = storage.sMaxValidSplit.get_tensor((self.tile_m,))
         sO = storage.sO.get_tensor(smem_layout_o)
 
-        # Handle semaphore reset — wait for dependent grids first
+        # 处理信号量（semaphore）复位——先等待依赖的 grid 完成
         if const_expr(semaphore_to_reset is not None):
             bidx, bidy, bidz = cute.arch.block_idx()
             if (
@@ -410,52 +412,54 @@ class FlashAttentionForwardCombine:
                 semaphore_to_reset[0] = 0
 
         if work_tile.is_valid_tile:
-            # Get number of splits (use maybe_virtual_batch for per-batch-slot splits)
+            # 获取 split 数量（使用 maybe_virtual_batch 按 batch 槽位取 split 数）
             num_splits = (
                 num_splits_dynamic_ptr[maybe_virtual_batch]
                 if const_expr(num_splits_dynamic_ptr is not None)
                 else mLSE_partial.shape[1]
             )
-            # Handle variable length sequences using SeqlenInfo
+            # 用 SeqlenInfo 处理变长序列
             seqlen_info = SeqlenInfo.create(
                 batch_idx=batch_idx,
                 seqlen_static=mO_partial.shape[0],
                 cu_seqlens=cu_seqlens,
                 seqused=seqused,
-                # Don't need to pass in tile size since we won't use offset_padded
+                # 不需要传入 tile 大小，因为这里不使用 offset_padded
             )
             seqlen, offset = seqlen_info.seqlen, seqlen_info.offset
 
-            # Extract number of heads (head index will be determined dynamically)
+            # 取出头数（head 索引将在运行期动态确定）
             num_head = mO_partial.shape[3]
             max_idx = seqlen * num_head
 
-            # TODO: early exit for single split if dynamic — for now always merge so the
-            # num_splits_dynamic == 1 case still writes mO from mO_partial[0].
+            # TODO: 若 split 数为动态，单 split 时本可提前退出——目前总是执行合并，
+            # 以便 num_splits_dynamic == 1 时仍能从 mO_partial[0] 写出 mO。
             if (const_expr(num_splits_dynamic_ptr is None) or num_splits > 0) and (
                 const_expr(not varlen) or m_block * self.tile_m < max_idx
             ):
-                # Wait for dependent grids (e.g., the main attention kernel that produces O_partial/LSE_partial)
+                # 等待依赖的 grid（例如产生 O_partial/LSE_partial 的主注意力内核）完成
                 cute.arch.griddepcontrol_wait()
 
                 # ===============================
-                # Step 1: Load LSE_partial from gmem to shared memory
+                # Step 1：把 LSE_partial 从 gmem 加载到共享内存
+                # 讲解：合并内核第 1 步把各 split 的 LSE（每行 softmax 分母的对数）读入共享内存，
+                # 后续需要用它们计算各 split 的加权系数。
                 # ===============================
 
                 mLSE_partial_cur = seqlen_info.offset_batch(mLSE_partial, batch_idx, dim=3)
                 mLSE_partial_copy = cute.tiled_divide(mLSE_partial_cur, (1,))
                 gmem_thr_copy_LSE = gmem_tiled_copy_LSE.get_slice(tidx)
                 tLSEsLSE = gmem_thr_copy_LSE.partition_D(sLSE)
-                # Create identity tensor for coordinate tracking
+                # 创建恒等张量（identity tensor）用于坐标跟踪
                 cLSE = cute.make_identity_tensor((self.max_splits, self.tile_m))
                 tLSEcLSE = gmem_thr_copy_LSE.partition_S(cLSE)
 
-                # Load LSE partial values
+                # 加载 LSE 的部分值
                 for m in cutlass.range(cute.size(tLSEcLSE, mode=[2]), unroll_full=True):
-                    mi = tLSEcLSE[0, 0, m][1]  # Get m coordinate
+                    mi = tLSEcLSE[0, 0, m][1]  # 取 m 坐标
                     idx = m_block * self.tile_m + mi
                     if idx < max_idx:
-                        # Calculate actual sequence position and head using FastDivmodDivisor
+                        # 用 FastDivmodDivisor 计算真实的序列位置与 head 索引
                         if const_expr(not varlen):
                             head_idx, m_idx = divmod(idx, seqlen_divmod)
                         else:
@@ -463,7 +467,7 @@ class FlashAttentionForwardCombine:
                             m_idx = idx - head_idx * seqlen
                         mLSE_partial_cur_copy = mLSE_partial_copy[None, m_idx, None, head_idx]
                         for s in cutlass.range(cute.size(tLSEcLSE, mode=[1]), unroll_full=True):
-                            si = tLSEcLSE[0, s, 0][0]  # Get split coordinate
+                            si = tLSEcLSE[0, s, 0][0]  # 取 split 坐标
                             if si < num_splits:
                                 cute.copy(
                                     gmem_thr_copy_LSE,
@@ -472,11 +476,13 @@ class FlashAttentionForwardCombine:
                                 )
                             else:
                                 tLSEsLSE[None, s, m].fill(-Float32.inf)
-                    # Don't need to zero out the rest of the LSEs, as we will not write the output to gmem
+                    # 不需要把其余 LSE 清零，因为不会把这些位置写回 gmem
                 cute.arch.cp_async_commit_group()
 
                 # ===============================
-                # Step 2: Load O_partial for pipeline stages
+                # Step 2：为流水线各阶段加载 O_partial
+                # 讲解：第 2 步用 cp.async 预取 O_partial。合并涉及多个 split，这里用多级流水线缓冲，
+                # 预先加载前 stages-1 个 split，让后续主循环能一边计算一边预取。
                 # ===============================
 
                 gmem_thr_copy_O_partial = gmem_tiled_copy_O_partial.get_slice(tidx)
@@ -485,13 +491,13 @@ class FlashAttentionForwardCombine:
                 tOsO_partial = gmem_thr_copy_O_partial.partition_D(sO)
                 mO_partial_cur = seqlen_info.offset_batch(mO_partial, batch_idx, dim=4)
 
-                # Precompute these values to avoid recomputing them in the loop
+                # 提前算好这些值，避免在循环里重复计算
                 num_rows = const_expr(cute.size(tOcO, mode=[1]))
                 tOmidx = cute.make_rmem_tensor(num_rows, cutlass.Int32)
                 tOhidx = cute.make_rmem_tensor(num_rows, cutlass.Int32)
                 tOrOptr = cute.make_rmem_tensor(num_rows, cutlass.Int64)
                 for m in cutlass.range(num_rows, unroll_full=True):
-                    mi = tOcO[0, m, 0][0]  # m coordinate
+                    mi = tOcO[0, m, 0][0]  # m 坐标
                     idx = m_block * self.tile_m + mi
                     if const_expr(not varlen):
                         tOhidx[m], tOmidx[m] = divmod(idx, seqlen_divmod)
@@ -524,17 +530,17 @@ class FlashAttentionForwardCombine:
                     mO_partial_cur.layout,
                 )
 
-                # Load first few stages of O_partial
+                # 预取前几个阶段的 O_partial
                 for stage in cutlass.range(self.stages - 1, unroll_full=True):
                     if stage < num_splits:
                         load_O_partial(stage, stage)
                     cute.arch.cp_async_commit_group()
 
                 # ===============================
-                # Step 3: Load and transpose LSE from smem to registers
+                # Step 3：把 LSE 从 smem 加载到寄存器并做转置
                 # ===============================
 
-                # Wait for LSE and initial O partial stages to complete
+                # 等待 LSE 与初始 O_partial 各阶段加载完成
                 cute.arch.cp_async_wait_group(self.stages - 1)
                 cute.arch.sync_threads()
                 # if cute.arch.thread_idx()[0] == 0:
@@ -549,17 +555,19 @@ class FlashAttentionForwardCombine:
                 cute.copy(s2r_tiled_copy_LSE, ts2rsLSE, ts2rrLSE)
 
                 # ===============================
-                # Step 4: Compute final LSE along split dimension
+                # Step 4：沿 split 维度计算最终 LSE
+                # 讲解：第 4 步做数值稳定的 softmax 合并——先跨 split 取 LSE 最大值，再计算
+                # exp(lse - lse_max) 作为权重并归一化，得到每个 split 的加权系数（数值稳定技巧）。
                 # ===============================
 
                 lse_sum = cute.make_rmem_tensor(cute.size(ts2rrLSE, mode=[2]), Float32)
                 ts2rcLSE = s2r_thr_copy_LSE.partition_D(cLSE)
-                # We compute the max valid split for each row to short-circuit the computation later
+                # 为每一行计算"最大有效 split"索引，以便后续提前短路（跳过无效 split）
                 max_valid_split = cute.make_rmem_tensor(cute.size(ts2rrLSE, mode=[2]), Int32)
                 assert cute.size(ts2rrLSE, mode=[0]) == 1
-                # Compute max, scales, and final LSE for each row
+                # 对每一行计算最大值、缩放系数与最终 LSE
                 for m in cutlass.range(cute.size(ts2rrLSE, mode=[2]), unroll_full=True):
-                    # Find max LSE value across splits
+                    # 在所有 split 中找 LSE 最大值
                     threads_per_col = const_expr(self.smem_threads_per_col_lse)
                     lse_max = cute.arch.warp_reduction_max(
                         ts2rrLSE[None, None, m]
@@ -568,19 +576,19 @@ class FlashAttentionForwardCombine:
                         threads_in_group=threads_per_col,
                     )
                     # if cute.arch.thread_idx()[0] == 0: cute.printf(lse_max)
-                    # Find max valid split index
+                    # 找最大有效 split 索引
                     max_valid_idx = -1
                     for s in cutlass.range(cute.size(ts2rrLSE, mode=[1]), unroll_full=True):
                         if ts2rrLSE[0, s, m] != -Float32.inf:
-                            max_valid_idx = ts2rcLSE[0, s, 0][0]  # Get split coordinate
+                            max_valid_idx = ts2rcLSE[0, s, 0][0]  # 取 split 坐标
                     # if cute.arch.thread_idx()[0] < 32: cute.printf(max_valid_idx)
                     max_valid_split[m] = cute.arch.warp_reduction_max(
                         max_valid_idx, threads_in_group=threads_per_col
                     )
-                    # Compute exp scales and sum
+                    # 计算 exp 缩放系数并求和
                     lse_max_cur = (
                         0.0 if lse_max == -Float32.inf else lse_max
-                    )  # In case all local LSEs are -inf
+                    )  # 防止所有局部 LSE 都是 -inf
                     LOG2_E = math.log2(math.e)
                     lse_sum_cur = 0.0
                     for s in cutlass.range(cute.size(ts2rrLSE, mode=[1]), unroll_full=True):
@@ -588,30 +596,30 @@ class FlashAttentionForwardCombine:
                             ts2rrLSE[0, s, m] * LOG2_E - (lse_max_cur * LOG2_E), fastmath=True
                         )
                         lse_sum_cur += scale
-                        ts2rrLSE[0, s, m] = scale  # Store scale for later use
+                        ts2rrLSE[0, s, m] = scale  # 暂存缩放系数，供后续使用
                     lse_sum_cur = cute.arch.warp_reduction_sum(
                         lse_sum_cur, threads_in_group=threads_per_col
                     )
                     lse_sum[m] = cute.math.log(lse_sum_cur, fastmath=True) + lse_max
-                    # Normalize scales
+                    # 归一化缩放系数
                     inv_sum = (
                         0.0
                         if (lse_sum_cur == 0.0 or lse_sum_cur != lse_sum_cur)
                         else 1.0 / lse_sum_cur
                     )
                     ts2rrLSE[None, None, m].store(ts2rrLSE[None, None, m].load() * inv_sum)
-                # Store the scales exp(lse - lse_logsum) back to smem
+                # 把归一化后的权重 exp(lse - lse_logsum) 存回 smem
                 cute.copy(s2r_tiled_copy_LSE, ts2rrLSE, ts2rsLSE)
 
-                # Store max valid split to smem
+                # 把最大有效 split 索引存入 smem
                 for m in cutlass.range(cute.size(ts2rrLSE, mode=[2]), unroll_full=True):
-                    if ts2rcLSE[0, 0, m][0] == 0:  # Only thread responsible for s=0 writes
+                    if ts2rcLSE[0, 0, m][0] == 0:  # 只有负责 s=0 的线程写入
                         mi = ts2rcLSE[0, 0, m][1]
                         if mi < self.tile_m:
                             sMaxValidSplit[mi] = max_valid_split[m]
 
                 # ===============================
-                # Step 5: Store final LSE to gmem
+                # Step 5：把最终 LSE 写回 gmem
                 # ===============================
 
                 if const_expr(mLSE is not None):
@@ -619,9 +627,9 @@ class FlashAttentionForwardCombine:
                         mLSE_cur = mLSE[None, None, batch_idx]
                     else:
                         mLSE_cur = cute.domain_offset((offset, 0), mLSE)
-                    if k_block == 0:  # Only first k_block writes LSE when mLSE is provided
+                    if k_block == 0:  # 只有第一个 k_block 写入 LSE（当提供了 mLSE 时）
                         for m in cutlass.range(cute.size(ts2rrLSE, mode=[2]), unroll_full=True):
-                            if ts2rcLSE[0, 0, m][0] == 0:  # Only thread responsible for s=0 writes
+                            if ts2rcLSE[0, 0, m][0] == 0:  # 只有负责 s=0 的线程写入
                                 mi = ts2rcLSE[0, 0, m][1]
                                 idx = m_block * self.tile_m + mi
                                 if idx < max_idx:
@@ -633,12 +641,15 @@ class FlashAttentionForwardCombine:
                                     mLSE_cur[m_idx, head_idx] = lse_sum[m]
 
                 # ===============================
-                # Step 6: Read O_partial and accumulate final O
+                # Step 6：读取 O_partial 并累加得到最终 O
+                # 讲解：第 6 步是合并内核的主循环：按 split 累加 rO += scale_s * O_partial_s。
+                # 它用两套 stage 索引做流水线——stage_load 负责 cp.async 预取后续 split，
+                # stage_compute 负责读取当前 split，二者错开以隐藏访存延迟。
                 # ===============================
 
                 cute.arch.sync_threads()
 
-                # Get max valid split for this thread
+                # 获取本线程负责行的最大有效 split
                 thr_max_valid_split = sMaxValidSplit[tOcO[0, 0, 0][0]]
                 for m in cutlass.range(1, cute.size(tOcO, mode=[1]), unroll_full=True):
                     thr_max_valid_split = max(thr_max_valid_split, sMaxValidSplit[tOcO[0, m, 0][0]])
@@ -650,28 +661,28 @@ class FlashAttentionForwardCombine:
                 stage_load = self.stages - 1
                 stage_compute = 0
 
-                # Main accumulation loop
+                # 主累加循环
                 for s in cutlass.range(thr_max_valid_split + 1, unroll=4):
-                    # Get scales for this split
+                    # 取当前 split 的缩放系数
                     scale = cute.make_rmem_tensor(num_rows, Float32)
                     for m in cutlass.range(num_rows, unroll_full=True):
-                        scale[m] = sLSE[s, tOcO[0, m, 0][0]]  # Get scale from smem
+                        scale[m] = sLSE[s, tOcO[0, m, 0][0]]  # 从 smem 取缩放系数
 
-                    # Load next stage if needed
+                    # 必要时预取下一个阶段（stage）的数据
                     split_to_load = s + self.stages - 1
                     if split_to_load <= thr_max_valid_split:
                         load_O_partial(split_to_load, stage_load)
                     cute.arch.cp_async_commit_group()
                     stage_load = 0 if stage_load == self.stages - 1 else stage_load + 1
 
-                    # Wait for the current stage to be ready
+                    # 等待当前阶段的数据就绪
                     cute.arch.cp_async_wait_group(self.stages - 1)
-                    # We don't need __syncthreads() because each thread is just reading its own data from smem
-                    # Copy from smem to registers
+                    # 这里不需要 __syncthreads()，因为每个线程只读自己那份 smem 数据
+                    # 从 smem 拷贝到寄存器
                     cute.autovec_copy(tOsO_partial[None, None, None, stage_compute], tOrO_partial)
                     stage_compute = 0 if stage_compute == self.stages - 1 else stage_compute + 1
 
-                    # Accumulate scaled partial results
+                    # 累加按比例缩放的部分结果
                     for m in cutlass.range(num_rows, unroll_full=True):
                         if tOhidx[m] >= 0 and scale[m] > 0.0:
                             tOrO[None, m, None].store(
@@ -680,7 +691,7 @@ class FlashAttentionForwardCombine:
                             )
 
                 # ===============================
-                # Step 7: Write final O to gmem
+                # Step 7：把最终 O 写回 gmem
                 # ===============================
 
                 rO = cute.make_rmem_tensor_like(tOrO, self.dtype)
@@ -693,7 +704,7 @@ class FlashAttentionForwardCombine:
                 elems_per_store = const_expr(cute.size(gmem_tiled_copy_O.layout_tv_tiled[1]))
                 # mO_cur_copy = cute.tiled_divide(mO_cur, (1, elems_per_store,))
                 gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
-                # Write final results
+                # 写出最终结果
                 for m in cutlass.range(num_rows, unroll_full=True):
                     if tOhidx[m] >= 0:
                         mO_cur_copy = cute.tiled_divide(
@@ -704,6 +715,8 @@ class FlashAttentionForwardCombine:
                             if const_expr(self.is_even_k) or tOpO[k]:
                                 cute.copy(gmem_thr_copy_O, rO[None, m, k], mO_cur_copy[None, k_idx])
 
+        # 讲解：load_O_partial 是 O_partial 的流水线预取辅助函数：把第 split 个分块的数据用
+        # cp.async 拷入指定的 stage 缓冲（tOsO_partial[..., stage]），实现异步流水线加载。
     @cute.jit
     def load_O_partial(
         self,

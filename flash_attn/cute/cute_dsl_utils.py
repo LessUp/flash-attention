@@ -50,7 +50,7 @@ def _get_device_arch_and_num_sms(device_index: int) -> tuple[int, int]:
 
 
 def get_num_sms_for_selection(device_index: int, arch: int) -> int:
-    """Return the SM count of the matching local GPU or cross-compilation target."""
+    """返回匹配的本地 GPU 或交叉编译目标的 SM 数量。"""
     override = os.getenv("FLASH_ATTENTION_NUM_SMS")
     if override is not None:
         num_sms = int(override)
@@ -77,7 +77,7 @@ def _has_aligned_pointer(tensor: torch.Tensor, align_bytes: int) -> bool:
 
 
 def _is_aligned_layout(tensor: torch.Tensor, align_bytes: int) -> bool:
-    """Return whether a tensor satisfies the pointer and stride ABI kernels assume."""
+    """返回张量是否满足 kernel 假定的指针与步长 ABI。"""
     if tensor.stride(-1) != 1 or not _has_aligned_pointer(tensor, align_bytes):
         return False
     stride_alignment = max(1, align_bytes // tensor.element_size())
@@ -85,7 +85,7 @@ def _is_aligned_layout(tensor: torch.Tensor, align_bytes: int) -> bool:
 
 
 def maybe_contiguous(tensor: torch.Tensor | None, align_bytes: int = 16):
-    """Canonicalize inputs to the pointer and stride alignment kernels assume."""
+    """把输入规范化为 kernel 假定的指针与步长对齐形式。"""
     if tensor is None:
         return None
     if tensor.is_contiguous():
@@ -100,7 +100,7 @@ def maybe_contiguous(tensor: torch.Tensor | None, align_bytes: int = 16):
 
 
 def validate_output_layout(tensor: torch.Tensor, name: str, align_bytes: int) -> None:
-    """Validate a caller-provided output or SplitKV workspace."""
+    """校验调用方提供的输出或 SplitKV 工作区。"""
     assert 0 not in tensor.stride(), f"{name} must not have broadcast dimensions"
     if tensor.is_contiguous():
         assert _has_aligned_pointer(tensor, align_bytes), (
@@ -113,10 +113,10 @@ def validate_output_layout(tensor: torch.Tensor, name: str, align_bytes: int) ->
 
 
 def assume_strides_aligned(t):
-    """Assume all strides except the last are divisible by 128 bits.
-
-    Python int strides (e.g., stride=0 from GQA expand) are kept as-is
-    since they're static and don't need alignment assumptions.
+    """假定除最后一维外的所有步长都能被 128 位整除。
+    
+    Python 整数步长（例如 GQA 扩展产生的 stride=0）保持原样，
+    因为它们是静态的，不需要对齐假定。
     """
     divby = 128 // t.element_type.width
     strides = tuple(s if isinstance(s, int) else cute.assume(s, divby=divby) for s in t.stride[:-1])
@@ -124,18 +124,18 @@ def assume_strides_aligned(t):
 
 
 def assume_tensor_aligned(t):
-    """Rebuild a tensor with 128-bit aligned stride assumptions. Passes through None."""
+    """用 128 位对齐的步长假定重建张量。None 原样透传。"""
     if t is None:
         return None
     return cute.make_tensor(t.iterator, cute.make_layout(t.shape, stride=assume_strides_aligned(t)))
 
 
 def to_cute_tensor(t, assumed_align=16, leading_dim=-1, fully_dynamic=False, enable_tvm_ffi=True):
-    """Convert torch tensor to cute tensor for TVM FFI. leading_dim=-1 defaults to t.ndim-1."""
+    """把 torch 张量转换为 TVM FFI 用的 cute 张量。leading_dim=-1 默认取 t.ndim-1。"""
     if t is None:
         return None
-    # NOTE: torch 2.9.1 doesn't support fp8 via DLPack but 2.11.0 nightly does
-    # currently export raw bytes as uint8 and tell cutlass correct type
+    # 注意：torch 2.9.1 不支持通过 DLPack 传 fp8，但 2.11.0 nightly 支持
+    # 目前先以 uint8 导出原始字节并告知 cutlass 正确的类型
     # can directly export as fp8 when torch supports it
     if t.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
         tensor = from_dlpack(
@@ -156,9 +156,8 @@ def to_cute_tensor(t, assumed_align=16, leading_dim=-1, fully_dynamic=False, ena
 
 
 def to_cute_aux_tensor(t, enable_tvm_ffi=True):
-    """Convert torch tensor to cute tensor for TVM FFI, tailored to FlexAttention aux tensors.
-    This allows the user to specify alignment and leading dimension for aux tensors used in
-    custom score_mod callables.
+    """把 torch 张量转换为 TVM FFI 用的 cute 张量，专为 FlexAttention aux 张量定制。
+    允许用户为自定义 score_mod 可调用对象中使用的 aux 张量指定对齐和 leading 维。
     """
     assumed_align: int = getattr(t, "__assumed_align__", None)
     leading_dim: int = getattr(t, "__leading_dim__", None)
@@ -174,7 +173,7 @@ def to_cute_aux_tensor(t, enable_tvm_ffi=True):
 
 
 def _resolve_aux_leading_dim(tensor: torch.Tensor) -> int | None:
-    """Pick the mode CuTe keeps as a static stride-1 leading dimension."""
+    """选择 CuTe 保留为静态 stride-1 leading 维的 mode。"""
     leading_dim = getattr(tensor, "__leading_dim__", None)
     if leading_dim is not None:
         if tensor.ndim == 0:
@@ -194,7 +193,7 @@ def _resolve_aux_leading_dim(tensor: torch.Tensor) -> int | None:
 
 
 def get_aux_tensor_metadata(aux_tensors):
-    """Return the static aux-tensor ABI facts that must key the compile cache."""
+    """返回必须作为编译缓存 key 的静态 aux 张量 ABI 事实。"""
     metadata = []
     for tensor in aux_tensors:
         leading_dim = _resolve_aux_leading_dim(tensor)
@@ -207,11 +206,11 @@ def get_aux_tensor_metadata(aux_tensors):
 
 
 def get_broadcast_dims(tensor: torch.Tensor) -> Tuple[bool, ...]:
-    """Return tuple of bools indicating which dims have stride=0 (broadcast).
-
-    This is useful for compile keys since CuTe's mark_layout_dynamic() keeps
-    stride=0 as static, meaning kernels compiled with different broadcast
-    patterns are not interchangeable.
+    """返回布尔元组，指示哪些维是 stride=0（广播）。
+    
+    这对编译缓存 key 很有用：CuTe 的 mark_layout_dynamic() 会把
+    stride=0 保留为静态，这意味着用不同广播模式编译的 kernel
+    不可互换。
     """
     strides = tensor.stride()
     # Written this way for speed.

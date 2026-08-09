@@ -39,13 +39,13 @@ class SchedulingMode(IntEnum):
 
 @dataclass
 class SchedulerState(ParamsBase):
-    """Runtime state shared by CLC and dynamic persistent tile schedulers:
-    the async pipeline and its producer/consumer states.
+    """CLC 与动态持久化 tile 调度器共享的运行时状态：
+    异步流水线及其生产者/消费者状态。
 
-    Main kernels construct this via `create_clc` / `create_dynamic_persistent`,
-    which return the appropriate concrete state (`ClcSchedulerState` or
-    `DynamicPersistentSchedulerState`). Schedulers consume it through the
-    `ctx: SchedulerState | None` parameter on their `__init__(...)`.
+    主 kernel 通过 `create_clc` / `create_dynamic_persistent` 构造本对象，
+    它们返回相应的具体状态（`ClcSchedulerState` 或
+    `DynamicPersistentSchedulerState`）。调度器通过其 `__init__(...)` 的
+    `ctx: SchedulerState | None` 参数消费它。
     """
 
     _pipeline: cutlass.pipeline.PipelineAsync
@@ -88,17 +88,16 @@ class SchedulerState(ParamsBase):
 
 @dataclass
 class ClcSchedulerState(SchedulerState):
-    """Owns the runtime state shared by CLC-capable tile schedulers.
+    """持有支持 CLC 的 tile 调度器共享的运行时状态。
 
-    `FlashAttentionForwardSm100` constructs this state because it owns the CLC
-    response buffer, mbarrier storage, and launch geometry needed to initialize
-    the hardware scheduler and async pipeline. Individual tile schedulers then
-    consume this state and map the returned hardware work tiles into their own
-    logical `WorkTileInfo` coordinates.
+    `FlashAttentionForwardSm100` 构造该状态，因为它拥有初始化硬件调度器和
+    异步流水线所需的 CLC 响应缓冲区、mbarrier 存储和启动几何信息。各个 tile
+    调度器随后消费该状态，并把硬件返回的工作 tile 映射到它们自己的逻辑
+    `WorkTileInfo` 坐标。
 
-    To add CLC support to a scheduler:
-    - implement `clc_problem_shape(params)` so the kernel can create the hardware scheduler
-    - map `ctx.initial_work_tile_info()` and `ctx.get_current_work()` into scheduler coordinates
+    要给调度器添加 CLC 支持：
+    - 实现 `clc_problem_shape(params)`，让 kernel 能创建硬件调度器
+    - 把 `ctx.initial_work_tile_info()` 和 `ctx.get_current_work()` 映射到调度器坐标
     """
 
     _hw_scheduler: ClcDynamicPersistentTileScheduler
@@ -118,8 +117,8 @@ class ClcSchedulerState(SchedulerState):
 
 @dataclass
 class DynamicPersistentSchedulerState(SchedulerState):
-    """Semaphore-backed: the scheduler class drives atomicAdd + warp-prefix-sum
-    and writes the resolved work tile via `write_work_info`."""
+    """基于信号量：调度器类驱动 atomicAdd + warp 前缀和（warp-prefix-sum），
+    并通过 `write_work_info` 写出解析后的工作 tile。"""
 
     _work_info: cute.Tensor
 
@@ -140,7 +139,7 @@ class DynamicPersistentSchedulerState(SchedulerState):
 
 
 class WorkTileInfo(cutlass.utils.WorkTileInfo):
-    """Altered WorkTileInfo which includes four axes: (block, head, batch, split)"""
+    """包含四个轴的扩展版 WorkTileInfo：(block, head, batch, split)"""
 
     @override
     def __new_from_mlir_values__(self, values: list[ir.Value]) -> "WorkTileInfo":
@@ -152,37 +151,37 @@ class WorkTileInfo(cutlass.utils.WorkTileInfo):
 
 @runtime_checkable
 class TileSchedulerProtocol(Protocol):
-    """Protocol defining the interface all tile schedulers must implement.
+    """定义所有 tile 调度器必须实现的接口协议。
 
-    Schedulers are responsible for:
-    1. Coordinate mapping: linear tile index -> (m_block, head, batch, split)
-    2. Work distribution: how to get the next tile (static grid-stride vs dynamic)
+    调度器负责：
+    1. 坐标映射：线性 tile 索引 -> (m_block, head, batch, split)
+    2. 工作分发：如何获取下一个 tile（静态 grid-stride 还是动态）
     """
 
     def initial_work_tile_info(self) -> WorkTileInfo:
-        """Get the initial work tile for this CTA."""
+        """获取该 CTA 的初始工作 tile。"""
         ...
 
     def advance_to_next_work(self, *, loc=None, ip=None):
-        """Consumer-side advance: move to next tile and return it.
+        """消费者侧推进：移动到下一个 tile 并返回它。
 
-        For static schedulers: grid-stride increment + get_current_work.
-        For dynamic schedulers: consumer wait + get_current_work + consumer release + state advance.
+        静态调度器：grid-stride 递增 + get_current_work。
+        动态调度器：consumer wait + get_current_work + consumer release + 状态推进。
         """
         ...
 
     def prefetch_next_work(self, *, loc=None, ip=None) -> None:
-        """Producer-side prefetch of next work tile (no-op for static schedulers).
+        """生产者侧预取下一个工作 tile（静态调度器为 no-op）。
 
-        For dynamic schedulers: producer acquire (+ issue CLC query) + producer state advance.
-        Only called by the scheduler warp.
+        动态调度器：producer acquire（+ 发起 CLC 查询）+ 生产者状态推进。
+        仅由调度 warp 调用。
         """
         ...
 
     def producer_tail(self, *, loc=None, ip=None) -> None:
-        """Producer-side cleanup after the last tile.
+        """最后一个 tile 之后的生产者侧清理。
 
-        No-op for static schedulers. For dynamic schedulers: pipeline producer_tail.
+        静态调度器为 no-op。动态调度器：流水线 producer_tail。
         """
         ...
 
@@ -278,7 +277,7 @@ class SingleTileScheduler:
             blk_coord = cute.arch.cluster_idx()
         return SingleTileScheduler(params, blk_coord, loc=loc, ip=ip)
 
-    # called by host
+    # 由主机（host）调用
     @staticmethod
     def get_grid_shape(
         params: Params,
@@ -286,10 +285,10 @@ class SingleTileScheduler:
         loc=None,
         ip=None,
     ) -> Tuple[Int32, Int32, Int32]:
-        # TODO: this hard-codes the fact that we only use cluster = (1, 1) or (2, 1)
+        # TODO: 这里硬编码了只使用 cluster = (1, 1) 或 (2, 1) 的事实
         assert params.cluster_shape_mn[1] == 1, "Only cluster_shape_mn[1] == 1 is supported"
         if const_expr(params.use_cluster_idx):
-            # Grid must have num_block * cluster_m physical blocks so that there are num_block clusters
+            # 网格必须有 num_block * cluster_m 个物理块，才能形成 num_block 个簇
             grid_x = params.num_block * params.cluster_shape_mn[0]
         else:
             grid_x = cute.round_up(params.num_block, params.cluster_shape_mn[0])
@@ -306,7 +305,7 @@ class SingleTileScheduler:
             head_idx, split_idx = divmod(head_idx, self.params.num_splits_divmod)
         else:
             split_idx = Int32(0)
-        # Pack dynamic per-batch num_splits into high 16 bits of split_idx
+        # 把动态的逐 batch num_splits 打包进 split_idx 的高 16 位
         if const_expr(self.params.is_split_kv and self.params.num_splits_dynamic_ptr is not None):
             if is_valid:
                 num_splits = Int32(self.params.num_splits_dynamic_ptr[batch_idx])
@@ -343,8 +342,8 @@ class SingleTileScheduler:
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
         scheduler = SingleTileScheduler(*(tuple(obj_list)), loc=self._loc)
-        # Note: _is_first_block is a Python-only attribute omitted from MLIR values,
-        # so it must be restored explicitly after reconstruction.
+        # 注意：_is_first_block 是仅存在于 Python 侧的属性，不包含在 MLIR 值中，
+        # 因此重建后必须显式恢复它。
         scheduler._is_first_block = self._is_first_block
         return scheduler
 
@@ -489,23 +488,23 @@ class SingleTileLPTScheduler:
             assert scheduling_mode in (SchedulingMode.STATIC, SchedulingMode.CLC), (
                 f"Only STATIC and CLC are supported, got {scheduling_mode!r}"
             )
-            # int64: this product overflows int32 once seqlen_k * (headdim +
-            # headdim_v) * element_size > 2**31 (seqlen_k > ~4M for hdim-128 bf16).
+            # int64：一旦 seqlen_k * (headdim + headdim_v) * element_size > 2**31
+            #（hdim-128 bf16 时 seqlen_k > ~4M），该乘积会溢出 int32。
             size_one_kv_head = (
                 cutlass.Int64(args.seqlen_k) * (args.headdim + args.headdim_v) * args.element_size
             )
             size_one_head = size_one_kv_head
-            size_l2 = 50 * 1024 * 1024  # 40 MB for K & V
-            # Swizzle is the size of each "section". Round swizzle to a power of 2
-            # Need to be careful about the case where only one head will fit
-            # swizzle is how many heads can fit in L2
-            # Seems faster if swizzle is a power of 2
+            size_l2 = 50 * 1024 * 1024  # 40 MB 用于 K 和 V
+            # swizzle 是每个"分区"（section）的大小。把 swizzle 圆整为 2 的幂
+            # 需要注意只有一个 head 能放下的情况
+            # swizzle 是 L2 中能放下的 head 数量
+            # swizzle 是 2 的幂时似乎更快
             log2_floor = lambda n: 31 - clz(n)
             swizzle = (
                 1 if size_l2 < size_one_head else (1 << log2_floor(Int32(size_l2 // size_one_head)))
             )
-            # If we're in the last section (called residual), we don't want to divide by
-            # swizzle. Instead we want to divide by the remainder.
+            # 若处于最后一个分区（称为残差分区），不应除以 swizzle，
+            # 而应除以余数（remainder）。
             num_hb_quotient = (args.num_head * args.num_batch) // swizzle
             num_hb_remainder = (args.num_head * args.num_batch) % swizzle
             return SingleTileLPTScheduler.Params(
@@ -566,7 +565,7 @@ class SingleTileLPTScheduler:
             else params.num_batch
         )
         if const_expr(params.use_cluster_idx):
-            # Grid must have num_block * cluster_m physical blocks so that there are num_block clusters
+            # 网格必须有 num_block * cluster_m 个物理块，才能形成 num_block 个簇
             grid_x = params.num_block * params.cluster_shape_m
         else:
             grid_x = cute.round_up(params.num_block, params.cluster_shape_m)
@@ -609,16 +608,16 @@ class SingleTileLPTScheduler:
 
     @cute.jit
     def clc_work_to_coords(self, work) -> WorkTileInfo:
-        """Convert CLC response (block, head, batch_split) to WorkTileInfo.
+        """把 CLC 响应 (block, head, batch_split) 转换为 WorkTileInfo。
 
-        CLC returns raw grid coordinates — no L2 swizzle (hardware decides order).
-        We only apply cluster division, optional LPT block reversal, and split_kv unpacking.
+        CLC 返回原始网格坐标 —— 无 L2 swizzle（顺序由硬件决定）。
+        我们只应用簇（cluster）划分、可选的 LPT 块反转和 split_kv 解包。
         """
         block_idx = work.tile_idx[0]
         if const_expr(self.params.cluster_shape_m > 1):
             block_idx = block_idx // self.params.cluster_shape_m
         if const_expr(self.params.lpt):
-            # Longest-processing-time-first: reverse block order
+            # 最长处理时间优先（LPT）：反转块顺序
             if const_expr(self.params.cluster_shape_m > 1 and not self.params.use_cluster_idx):
                 num_block = self.params.num_block // self.params.cluster_shape_m
             else:
@@ -632,7 +631,7 @@ class SingleTileLPTScheduler:
         if const_expr(self.params.cluster_shape_m > 1 and not self.params.use_cluster_idx):
             bidx_in_cluster = cute.arch.block_in_cluster_idx()
             block_idx = block_idx * self.params.cluster_shape_m + bidx_in_cluster[0]
-        # Pack dynamic per-batch num_splits into high 16 bits of split_idx
+        # 把动态的逐 batch num_splits 打包进 split_idx 的高 16 位
         if const_expr(self.params.is_split_kv and self.params.num_splits_dynamic_ptr is not None):
             if work.is_valid_tile:
                 num_splits = Int32(self.params.num_splits_dynamic_ptr[batch_idx])
@@ -648,12 +647,12 @@ class SingleTileLPTScheduler:
             work = self._ctx.get_current_work()
             self._tile_idx = work.tile_idx[0]
             return self.clc_work_to_coords(work)
-        # Static path: L2-swizzled coordinate mapping
+        # 静态路径：L2 swizzle 坐标映射
         params = self.params
-        # Implement LPT scheduling coordinate calculation
+        # 实现 LPT 调度坐标计算
         bidhb, l2_mod = divmod(self._tile_idx, params.l2_major_divmod)
-        # If we're in the last section (called residual), we don't want to divide by
-        # swizzle. Instead we want to divide by the remainder.
+        # 若处于最后一个分区（称为残差分区），不应除以 swizzle，
+        # 而应除以余数（remainder）。
         block, bidhb_residual = 0, 0
         if bidhb < params.num_hb_quotient:
             block, bidhb_residual = divmod(l2_mod, params.l2_minor_divmod)
@@ -661,12 +660,12 @@ class SingleTileLPTScheduler:
             block, bidhb_residual = divmod(l2_mod, params.l2_minor_residual_divmod)
         bidhb_actual = bidhb * params.l2_minor + bidhb_residual
         batch_idx, head_idx = divmod(bidhb_actual, params.num_head_divmod)
-        # Longest-processing-time-first
+        # 最长处理时间优先（LPT）
         if const_expr(params.lpt):
             block = params.num_block - 1 - block
         is_valid = self._tile_idx < params.total_blocks
         split_idx = self._split_idx
-        # Pack dynamic per-batch num_splits into high 16 bits of split_idx
+        # 把动态的逐 batch num_splits 打包进 split_idx 的高 16 位
         if const_expr(params.is_split_kv and params.num_splits_dynamic_ptr is not None):
             if is_valid:
                 num_splits = Int32(params.num_splits_dynamic_ptr[batch_idx])
@@ -693,7 +692,7 @@ class SingleTileLPTScheduler:
             work = self.get_current_work()
             self._ctx.consumer_release(loc=loc, ip=ip)
             return work
-        # Single tile scheduler - set to invalid tile_idx to indicate no more work
+        # 单 tile 调度器 —— 设为无效 tile_idx 以表示没有更多工作
         self._tile_idx = self.params.total_blocks
         return self.get_current_work()
 
@@ -743,8 +742,8 @@ class SingleTileLPTBwdScheduler:
             args: TileSchedulerArguments, *, loc=None, ip=None
         ) -> "SingleTileLPTBwdScheduler.Params":
             size_l2 = 50 * 1024 * 1024
-            # int64: these products overflow int32 at large seqlen_k (> ~4M for
-            # hdim-128 bf16; the dqaccum *4 term wraps even sooner).
+            # int64：这些乘积在大 seqlen_k 时会溢出 int32（hdim-128 bf16 时
+            # > ~4M；dqaccum *4 项甚至更早发生回绕）。
             size_one_qdo_head = (
                 cutlass.Int64(args.seqlen_k) * (args.headdim + args.headdim_v) * args.element_size
             )
@@ -756,8 +755,8 @@ class SingleTileLPTBwdScheduler:
                 1 if size_l2 < size_one_head else (1 << log2_floor(Int32(size_l2 // size_one_head)))
             )
             # swizzle = 8
-            # If we're in the last section (called residual), we don't want to divide by
-            # swizzle. Instead we want to divide by the remainder.
+            # 若处于最后一个分区（称为残差分区），不应除以 swizzle，
+            # 而应除以余数（remainder）。
             num_hb_quotient = (args.num_head * args.num_batch) // swizzle
             num_hb_remainder = (args.num_head * args.num_batch) % swizzle
             num_block = cute.ceil_div(args.num_block, args.cluster_shape_mn[0])
@@ -772,7 +771,7 @@ class SingleTileLPTBwdScheduler:
                 l2_major_divmod=FastDivmodDivisor(swizzle * num_block),
                 l2_minor_residual_divmod=FastDivmodDivisor(
                     max(num_hb_remainder, 1)
-                ),  # don't divide by 0
+                ),  # 避免除以 0
                 num_hb_quotient=Int32(num_hb_quotient),
                 cluster_shape_mn=args.cluster_shape_mn,
                 spt=args.lpt,
@@ -803,7 +802,7 @@ class SingleTileLPTBwdScheduler:
         tile_idx = cute.arch.block_idx()[0]
         return SingleTileLPTBwdScheduler(params, tile_idx, loc=loc, ip=ip)
 
-    # called by host
+    # 由主机（host）调用
     @staticmethod
     def get_grid_shape(
         params: Params,
@@ -817,10 +816,10 @@ class SingleTileLPTBwdScheduler:
     def get_current_work(self, *, loc=None, ip=None) -> cutlass.utils.WorkTileInfo:
         cluster_idx = self._tile_idx // self.params.cluster_shape_mn[0]
         params = self.params
-        # Implement LPT scheduling coordinate calculation
+        # 实现 LPT 调度坐标计算
         bidhb, l2_mod = divmod(cluster_idx, params.l2_major_divmod)
-        # If we're in the last section (called residual), we don't want to divide by
-        # swizzle. Instead we want to divide by the remainder.
+        # 若处于最后一个分区（称为残差分区），不应除以 swizzle，
+        # 而应除以余数（remainder）。
         block, bidhb_residual = 0, 0
         if bidhb < params.num_hb_quotient:
             block, bidhb_residual = divmod(l2_mod, params.l2_minor_divmod)
@@ -843,7 +842,7 @@ class SingleTileLPTBwdScheduler:
         pass
 
     def advance_to_next_work(self, *, loc=None, ip=None):
-        # Single tile scheduler - set to invalid tile_idx to indicate no more work
+        # 单 tile 调度器 —— 设为无效 tile_idx 以表示没有更多工作
         self._tile_idx = self.params.total_blocks
         return self.get_current_work()
 
@@ -865,14 +864,13 @@ class SingleTileLPTBwdScheduler:
 
 @dataclass
 class VarlenDecoder(ParamsBase):
-    """Per-batch m-block lookup + warp-prefix-sum search-and-decode of the
-    varlen work tile. Composed into both `SingleTileVarlenScheduler.Params`
-    and `DynamicPersistentVarlenScheduler.Params`.
+    """逐 batch 的 m-block 查找 + 用 warp 前缀和搜索并解码 varlen 工作 tile。
+    组合进 `SingleTileVarlenScheduler.Params` 和
+    `DynamicPersistentVarlenScheduler.Params` 两者。
 
-    `fold_splits_into_scan` controls whether the prefix-sum scan folds per-batch
-    `num_splits` into the per-batch tile count (DynamicPersistent) or always
-    counts only m_blocks (SingleTileVarlen, where splits are dispatched at the
-    grid level and resolved post-scan).
+    `fold_splits_into_scan` 控制前缀和扫描是把逐 batch 的 `num_splits`
+    折叠进逐 batch 的 tile 计数（DynamicPersistent），还是始终只统计
+    m_blocks（SingleTileVarlen，其 splits 在网格层分发、扫描后解析）。
     """
 
     num_head: Int32
@@ -910,10 +908,10 @@ class VarlenDecoder(ParamsBase):
         loc=None,
         ip=None,
     ) -> "VarlenDecoder":
-        size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
-        # if backward, this is qdo block size
+        size_l2 = 50 * 1024 * 1024  # 50 MB 用于 K 和 V
+        # 若是反向传播，这是 qdo 块大小
         kv_block_size = (args.headdim + args.headdim_v) * args.element_size * args.tile_shape_mn[1]
-        # if backward, add dqaccum block size to calculate swizzle
+        # 若是反向传播，加上 dqaccum 块大小来计算 swizzle
         if head_swizzle:
             kv_block_size += args.headdim * 4 * args.tile_shape_mn[1]
         max_kvblock_in_l2 = size_l2 // kv_block_size
@@ -944,7 +942,7 @@ class VarlenDecoder(ParamsBase):
 
     @cute.jit
     def _num_m_blocks(self, lane: Int32, bidb_start: Int32) -> Int32:
-        """Per-batch m-block count"""
+        """逐 batch 的 m-block 计数"""
         batch_idx = lane + bidb_start
         is_valid = batch_idx < self.num_batch and lane < cute.arch.WARP_SIZE - 1
         if cutlass.const_expr(self.num_m_blocks_ptr is not None):
@@ -1015,7 +1013,7 @@ class VarlenDecoder(ParamsBase):
         bidb_start: Int32,
         group_start_tile: Int32,
     ) -> Tuple[Int32, Int32, Int32, Int32, Int32, Int32, Boolean]:
-        """Search varlen batches via warp-level prefix sums and decode the work tile.
+        """通过 warp 级前缀和搜索 varlen batch，并解码工作 tile。
 
         Returns
             - block
@@ -1026,15 +1024,15 @@ class VarlenDecoder(ParamsBase):
             - group_start_tile
             - is_valid
         """
-        # The scan counts m_blocks unless splits are folded into it, so the cumsum used as a
-        # hint must match: cu_total_splits_m_blocks only applies to the folded (persistent)
-        # layout, where SingleTileVarlen keeps splits in a separate grid dim.
+        # 扫描默认只统计 m_blocks，除非 splits 被折叠进扫描，因此用作提示的 cumsum
+        # 必须与之匹配：cu_total_splits_m_blocks 只适用于折叠（持久化）布局，
+        # 在那种布局里 SingleTileVarlen 把 splits 放在独立的网格维。
         if const_expr(self.fold_splits_into_scan):
             cu_hint_ptr = self.cu_total_splits_m_blocks_ptr
         else:
             cu_hint_ptr = self.cu_total_m_blocks_ptr
-        # Both SingleTileVarlen STATIC and CLC; not DynamicPersistent (where
-        # warp-scan's _bidb_start resumption already amortizes per-call cost).
+        # 同时适用于 SingleTileVarlen 的 STATIC 和 CLC；不适用于 DynamicPersistent
+        #（其 warp-scan 的 _bidb_start 续扫已经分摊了每次调用的开销）。
         hint_mode_ok = const_expr(
             cu_hint_ptr is not None
             and (
@@ -1042,8 +1040,8 @@ class VarlenDecoder(ParamsBase):
                 or self.scheduling_mode == SchedulingMode.CLC
             )
         )
-        # O(1) inverted index (flat block -> batch) replaces the warp scan outright. Needs the
-        # unfolded layout, where a batch owns a contiguous tile range given by the cumsum.
+        # O(1) 的倒排索引（扁平 block -> batch）直接取代 warp 扫描。它需要
+        # 展开布局：该布局中一个 batch 拥有由 cumsum 给定的连续 tile 区间。
         use_blocks_to_batch = const_expr(
             hint_mode_ok
             and self.blocks_to_batch_idx_ptr is not None
@@ -1117,9 +1115,9 @@ class VarlenDecoder(ParamsBase):
             mh_block = next_tile_idx - group_start_tile
 
             if const_expr(self.lpt or self.head_swizzle):
-                # This is a version of the SingleTileLPTScheduler, complicated by the fact that
-                # the seqlen can vary per batch.
-                # TODO: is there any case where num_m_blocks is 0?
+                # 这是 SingleTileLPTScheduler 的一个变体，复杂之处在于每个 batch 的
+                # seqlen 可能不同。
+                # TODO: 是否存在 num_m_blocks 为 0 的情况？
                 if const_expr(not self.is_split_kv) or num_splits == 1:
                     if const_expr(self.num_nheads_in_l2_ptr is not None):
                         if const_expr(self.virtual_batch_idx_ptr is not None):
@@ -1129,7 +1127,7 @@ class VarlenDecoder(ParamsBase):
                         else:
                             nheads_in_l2 = Int32(self.num_nheads_in_l2_ptr[batch_idx])
                     else:
-                        # TODO: by right we should read the seqlen_kv but we're assuming seqlen_q == seqlen_k here
+                        # TODO: 严格来说应读取 seqlen_kv，但这里假设 seqlen_q == seqlen_k
                         num_n_blocks = (
                             num_m_blocks
                             * self.tile_shape_mn[0]
@@ -1137,7 +1135,7 @@ class VarlenDecoder(ParamsBase):
                             // self.qhead_per_kvhead_packgqa
                             // self.tile_shape_mn[1]
                         )
-                        # Seems faster to have nheads_in_l2 be a power of 2
+                        # 让 nheads_in_l2 是 2 的幂似乎更快
                         nheads_in_l2 = (
                             16
                             if num_n_blocks * 16 <= self.max_kvblock_in_l2
@@ -1283,7 +1281,7 @@ class SingleTileVarlenScheduler:
         tile_idx, split_idx, _ = cute.arch.block_idx()
         return SingleTileVarlenScheduler(params, tile_idx, split_idx, loc=loc, ip=ip)
 
-    # called by host
+    # 由主机（host）调用
     @staticmethod
     def get_grid_shape(
         params: Params,
@@ -1295,13 +1293,13 @@ class SingleTileVarlenScheduler:
         total_blocks_max = (
             params.total_q + d.num_batch * (d.cluster_shape_m * d.tile_shape_mn[0] - 1)
         ) // d.tile_shape_mn[0]
-        # Round down to nearest multiple of cluster since odd excess is always padding.
+        # 向下取整到最近的 cluster 倍数，因为多出的奇数部分总是填充。
         total_blocks_max = total_blocks_max // d.cluster_shape_m * d.cluster_shape_m
         return (total_blocks_max * d.num_head, d.num_splits, Int32(1))
 
     @cute.jit
     def _decode_work_tile(self) -> WorkTileInfo:
-        """Map self._tile_idx to (block, head, batch, split) via warp-level prefix sums."""
+        """通过 warp 级前缀和把 self._tile_idx 映射到 (block, head, batch, split)。"""
         d = self.params.decoder
         next_tile_idx = self._tile_idx // d.cluster_shape_m
         block, head_idx, batch_idx, _, _, _, is_valid = d.decode(next_tile_idx, Int32(0), Int32(0))
@@ -1310,7 +1308,7 @@ class SingleTileVarlenScheduler:
         if const_expr(d.virtual_batch_idx_ptr is not None):
             if is_valid:
                 batch_idx = d.virtual_batch_idx_ptr[batch_idx]
-        # Pack dynamic per-batch num_splits into high 16 bits of split_idx
+        # 把动态的逐 batch num_splits 打包进 split_idx 的高 16 位
         if const_expr(d.is_split_kv and d.num_splits_dynamic_ptr is not None):
             if is_valid:
                 num_splits = Int32(d.num_splits_dynamic_ptr[batch_idx])
@@ -1324,10 +1322,10 @@ class SingleTileVarlenScheduler:
     def get_current_work(self, *, loc=None, ip=None) -> WorkTileInfo:
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             clc_work = self._ctx.get_current_work()
-            # Default to grid_dim (one past last valid flat index) so _decode_work_tile
-            # returns is_valid=False when CLC is exhausted. CLC tile_idx is garbage when
-            # invalid, so we can't trust it. Local-then-assign avoids CuTe DSL structural
-            # mismatch on self inside the runtime if.
+            # 默认取 grid_dim（最后一个有效扁平索引之后的一个位置），使 CLC 耗尽时
+            # _decode_work_tile 返回 is_valid=False。CLC 无效时的 tile_idx 是垃圾值，
+            # 不能信任。先算到局部变量再赋值，可避免运行时 if 中 self 的
+            # CuTe DSL 结构不匹配。
             new_tile_idx = cute.arch.grid_dim()[0]
             new_split_idx = Int32(0)
             if clc_work.is_valid_tile:
@@ -1342,7 +1340,7 @@ class SingleTileVarlenScheduler:
     def initial_work_tile_info(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             clc_work = self._ctx.initial_work_tile_info()
-            # See get_current_work for why grid_dim and local-then-assign.
+            # 为什么用 grid_dim 和"先局部后赋值"，参见 get_current_work。
             new_tile_idx = cute.arch.grid_dim()[0]
             new_split_idx = Int32(0)
             if clc_work.is_valid_tile:
@@ -1390,7 +1388,7 @@ class SingleTileVarlenScheduler:
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
         scheduler = self.__class__(*obj_list, loc=self._loc)
-        # See the note on Python-only attributes in SingleTileScheduler.
+        # 参见 SingleTileScheduler 中关于 Python 专属属性的说明。
         scheduler._is_first_block = self._is_first_block
         return scheduler
 
@@ -1411,7 +1409,7 @@ class DynamicPersistentVarlenScheduler:
             assert args.mCuSeqlensQ is not None or args.mSeqUsedQ is not None, (
                 "At least one of mCuSeqlensQ or mSeqUsedQ must be provided"
             )
-            # TODO: support non-trivial cluster shapes in a follow-on PR
+            # TODO: 在后续 PR 中支持非平凡簇形状
             assert args.cluster_shape_mn[0] == 1 and args.cluster_shape_mn[1] == 1, (
                 "DynamicPersistentVarlenScheduler currently requires cluster_shape_mn == (1, 1)"
             )
@@ -1470,7 +1468,7 @@ class DynamicPersistentVarlenScheduler:
     ) -> "DynamicPersistentVarlenScheduler":
         return DynamicPersistentVarlenScheduler(params, ctx, Int32(0), Int32(0), loc=loc, ip=ip)
 
-    # called by host
+    # 由主机（host）调用
     @staticmethod
     def get_grid_shape(
         params: Params,
@@ -1530,8 +1528,8 @@ class DynamicPersistentVarlenScheduler:
         work_info, new_group_start_tile = self.get_current_work(
             next_tile_idx, self._bidb_start, self._group_start_tile
         )
-        # Advance scan state so the next prefetch resumes from this tile's batch
-        # group instead of restarting at batch 0.
+        # 推进扫描状态，使下一次预取从该 tile 所属的 batch 组继续，
+        # 而不是从 batch 0 重新开始。
         self._bidb_start = Int32(work_info.tile_idx[2])
         self._group_start_tile = new_group_start_tile
         ctx.producer_acquire()
@@ -1585,19 +1583,18 @@ class DynamicPersistentVarlenScheduler:
 
 
 # -----------------------------------------------------------------------------
-# SM100 FMHA-specific schedulers (kept separate from generic schedulers).
+# SM100 FMHA 专用调度器（与通用调度器分开维护）。
 # -----------------------------------------------------------------------------
 
 
 class Sm100FmhaStaticTileSchedulerParams:
-    """A class to represent parameters for the FMHA (Fused Multi-Head Attention) static tile scheduler.
+    """表示 FMHA（融合多头注意力）静态 tile 调度器参数的类。
 
-    This class holds the configuration parameters needed to initialize and configure
-    the tile scheduler for FMHA operations.
+    本类持有初始化与配置 FMHA 操作 tile 调度器所需的配置参数。
 
-    :ivar is_persistent: Whether to use persistent kernel mode.
+    :ivar is_persistent: 是否使用持久化 kernel 模式。
     :type is_persistent: bool
-    :ivar problem_shape_mbh: Problem shape in (M, B, H) format.
+    :ivar problem_shape_mbh: (M, B, H) 格式的问题形状。
     :type problem_shape_mbh: cute.Shape
     """
 
@@ -1610,11 +1607,11 @@ class Sm100FmhaStaticTileSchedulerParams:
         ip=None,
     ):
         """
-        Initializes the Sm100FmhaStaticTileSchedulerParams with the given parameters.
+        用给定的参数初始化 Sm100FmhaStaticTileSchedulerParams。
 
-        :param is_persistent: Whether to use persistent kernel mode.
+        :param is_persistent: 是否使用持久化 kernel 模式。
         :type is_persistent: bool
-        :param problem_shape_mbh: Problem shape in (M, B, H) format.
+        :param problem_shape_mbh: (M, B, H) 格式的问题形状。
         :type problem_shape_mbh: cute.Shape
         """
         self.is_persistent = is_persistent
@@ -1641,29 +1638,28 @@ class Sm100FmhaStaticTileSchedulerParams:
 
 
 class Sm100FmhaStaticTileScheduler:
-    """A static tile scheduler for FMHA (Fused Multi-Head Attention) operations.
+    """FMHA（融合多头注意力）操作的静态 tile 调度器。
 
-    This class manages the scheduling of work tiles for FMHA kernels, supporting
-    both persistent and non-persistent kernel modes. It tracks the current work
-    position and advances through the problem space efficiently.
+    本类管理 FMHA kernel 的工作 tile 调度，同时支持持久化与非持久化
+    kernel 模式。它跟踪当前工作位置，并在问题空间上高效推进。
 
-    :ivar _params: Scheduler parameters.
+    :ivar _params: 调度器参数。
     :type _params: Sm100FmhaStaticTileSchedulerParams
-    :ivar _blk_coord: Block coordinates.
+    :ivar _blk_coord: 块坐标。
     :type _blk_coord: cute.Coord
-    :ivar _grid_shape: Grid shape for the kernel.
+    :ivar _grid_shape: kernel 的网格形状。
     :type _grid_shape: cute.Shape
-    :ivar _is_persistent: Whether to use persistent kernel mode.
+    :ivar _is_persistent: 是否使用持久化 kernel 模式。
     :type _is_persistent: bool
-    :ivar _current_work_linear_idx: Current linear work index.
+    :ivar _current_work_linear_idx: 当前线性工作索引。
     :type _current_work_linear_idx: Int32
-    :ivar _problem_shape_mbh: Problem shape in (M, B, H) format.
+    :ivar _problem_shape_mbh: (M, B, H) 格式的问题形状。
     :type _problem_shape_mbh: cute.Layout
-    :ivar _num_blocks: Number of blocks in the problem.
+    :ivar _num_blocks: 问题中的块数。
     :type _num_blocks: Int32
-    :ivar _is_first_block: Whether this is the first block.
+    :ivar _is_first_block: 是否为第一个块。
     :type _is_first_block: bool
-    :ivar num_persistent_sm: Number of persistent SMs.
+    :ivar num_persistent_sm: 持久化 SM 的数量。
     :type num_persistent_sm: Int32
     """
 
@@ -1678,15 +1674,15 @@ class Sm100FmhaStaticTileScheduler:
         ip=None,
     ):
         """
-        Initializes the Sm100FmhaStaticTileScheduler with the given parameters.
+        用给定的参数初始化 Sm100FmhaStaticTileScheduler。
 
-        :param params: Scheduler parameters.
+        :param params: 调度器参数。
         :type params: Sm100FmhaStaticTileSchedulerParams
-        :param current_work_linear_idx: Current linear work index.
+        :param current_work_linear_idx: 当前线性工作索引。
         :type current_work_linear_idx: Int32
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param grid_shape: Grid shape for the kernel.
+        :param grid_shape: kernel 的网格形状。
         :type grid_shape: cute.Shape
         """
         self._params = params
@@ -1701,7 +1697,7 @@ class Sm100FmhaStaticTileScheduler:
         self._loc = loc
         self._ip = ip
 
-    # called by host
+    # 由主机（host）调用
     @staticmethod
     def get_grid_shape(
         params: Sm100FmhaStaticTileSchedulerParams,
@@ -1710,16 +1706,15 @@ class Sm100FmhaStaticTileScheduler:
         ip=None,
     ) -> cute.Shape:
         """
-        Determine the grid shape for the FMHA kernel.
+        确定 FMHA kernel 的网格形状。
 
-        For persistent kernels, the grid shape is limited by the number of SMs
-        (Streaming Multiprocessors) available on the device. For non-persistent
-        kernels, the grid shape matches the problem shape.
+        对持久化 kernel，网格形状受设备可用 SM（流多处理器）数量限制；
+        对非持久化 kernel，网格形状与问题形状一致。
 
-        :param params: Scheduler parameters.
+        :param params: 调度器参数。
         :type params: Sm100FmhaStaticTileSchedulerParams
 
-        :return: Grid shape as (M, B, H) tuple.
+        :return: (M, B, H) 元组形式的网格形状。
         :rtype: cute.Shape
         """
         if params.is_persistent:
@@ -1740,31 +1735,31 @@ class Sm100FmhaStaticTileScheduler:
         seqlen_q: Int32,
     ) -> Boolean:
         """
-        Check if the current work index is valid for the given query sequence length.
+        检查当前工作索引对给定 query 序列长度是否有效。
 
-        This method verifies that the current work tile index multiplied by the
-        query tiler size is within the bounds of the query sequence length.
+        本方法验证当前工作 tile 索引乘以 query tiler 大小后是否落在
+        query 序列长度范围内。
 
-        :param q_tiler: Query tiler size.
+        :param q_tiler: query tiler 大小。
         :type q_tiler: int
-        :param current_idx: Current work index.
+        :param current_idx: 当前工作索引。
         :type current_idx: Int32
-        :param seqlen_q: Query sequence length.
+        :param seqlen_q: query 序列长度。
         :type seqlen_q: Int32
 
-        :return: True if the work is valid, False otherwise.
+        :return: 工作有效返回 True，否则返回 False。
         :rtype: Boolean
         """
         return current_idx * q_tiler < seqlen_q
 
     def get_current_work(self, *, loc=None, ip=None) -> cutlass.utils.WorkTileInfo:
         """
-        Get information about the current work tile.
+        获取当前工作 tile 的信息。
 
-        Determines if the current work is valid and computes the tile coordinates
-        based on whether the kernel is persistent or non-persistent.
+        判断当前工作是否有效，并根据 kernel 是持久化还是非持久化
+        计算 tile 坐标。
 
-        :return: WorkTileInfo containing tile coordinates and validity flag.
+        :return: 包含 tile 坐标与有效性标志的 WorkTileInfo。
         :rtype: WorkTileInfo
         """
         is_valid = (
@@ -1781,7 +1776,7 @@ class Sm100FmhaStaticTileScheduler:
         else:
             blk_coord = self._blk_coord
 
-        # cur_tile_coord is (mid, 0, (bid, hid))
+        # cur_tile_coord 是 (mid, 0, (bid, hid))
         cur_tile_coord = (
             blk_coord[0],
             0,
@@ -1792,19 +1787,19 @@ class Sm100FmhaStaticTileScheduler:
 
     def initial_work_tile_info(self, *, loc=None, ip=None):
         """
-        Get the initial work tile information.
+        获取初始工作 tile 信息。
 
-        :return: Initial WorkTileInfo.
+        :return: 初始 WorkTileInfo。
         :rtype: WorkTileInfo
         """
         return self.get_current_work(loc=loc, ip=ip)
 
     def advance_to_next_work(self, *, advance_count=1, loc=None, ip=None):
         """
-        Advance to the next work tile and return it.
+        推进到下一个工作 tile 并返回它。
 
-        For persistent kernels, advances by the number of persistent SMs.
-        For non-persistent kernels, marks that the first block has been processed.
+        持久化 kernel 按持久化 SM 数量推进。
+        非持久化 kernel 则标记第一个块已处理。
         """
         if self._is_persistent:
             self._current_work_linear_idx += advance_count * self.num_persistent_sm
@@ -1812,11 +1807,11 @@ class Sm100FmhaStaticTileScheduler:
         return self.get_current_work()
 
     def prefetch_next_work(self, *, loc=None, ip=None):
-        """No-op for static scheduler."""
+        """静态调度器为 no-op。"""
         pass
 
     def producer_tail(self, *, loc=None, ip=None):
-        """No-op for static scheduler."""
+        """静态调度器为 no-op。"""
         pass
 
     def __extract_mlir_values__(self):
@@ -1837,7 +1832,7 @@ class Sm100FmhaStaticTileScheduler:
         scheduler = Sm100FmhaStaticTileScheduler(
             new_params, new_current_work_linear_idx, new_blk_coord, new_grid_shape
         )
-        # See the note on Python-only attributes in SingleTileScheduler.
+        # 参见 SingleTileScheduler 中关于 Python 专属属性的说明。
         scheduler._is_first_block = self._is_first_block
         return scheduler
 
@@ -1847,9 +1842,9 @@ def compute_sm100_fmha_grid(
     cta_tiler: Tuple[int, int, int],
     is_persistent: bool,
 ) -> Tuple[Sm100FmhaStaticTileSchedulerParams, Tuple[int, int, int]]:
-    """Compute grid parameters for FMHA (static scheduler).
+    """计算 FMHA（静态调度器）的网格参数。
 
-    The output tensor o has shape (s, d, ((h_r, h_k), b)).
+    输出张量 o 的形状为 (s, d, ((h_r, h_k), b))。
     """
     tile_sched_params = Sm100FmhaStaticTileSchedulerParams(
         is_persistent,
@@ -1864,19 +1859,19 @@ def compute_sm100_fmha_grid(
 
 
 ##############################################################################
-# Fmha CLC dynamic tile scheduler
+# FMHA CLC 动态 tile 调度器
 ##############################################################################
 
 
 class Sm100FmhaClcDynamicTileSchedulerParams:
-    """Parameters for FMHA CLC dynamic persistent tile scheduler.
+    """FMHA CLC 动态持久化 tile 调度器的参数。
 
-    This class manages the layout of tiles for CLC (Cluster Launch Control)
-    based dynamic scheduling, adapted for FMHA's (M, B, H) problem shape.
+    本类管理基于 CLC（Cluster Launch Control，簇启动控制）动态调度的
+    tile 布局，适配 FMHA 的 (M, B, H) 问题形状。
 
-    :ivar problem_shape_mbh: Problem shape in (M, B, H) format.
+    :ivar problem_shape_mbh: (M, B, H) 格式的问题形状。
     :type problem_shape_mbh: cute.Shape
-    :ivar cluster_shape_mnk: Cluster shape in (M, N, K) format.
+    :ivar cluster_shape_mnk: (M, N, K) 格式的簇形状。
     :type cluster_shape_mnk: cute.Shape
     """
 
@@ -1894,15 +1889,15 @@ class Sm100FmhaClcDynamicTileSchedulerParams:
         self._loc = loc
         self._ip = ip
 
-        # FMHA uses linear indexing over (M, B, H), convert to (M, N, L) style
-        # For FMHA: M dim is tile count along sequence, N=1, L=(B*H)
+        # FMHA 使用 (M, B, H) 上的线性索引，转换为 (M, N, L) 风格
+        # FMHA：M 维是沿序列的 tile 数，N=1，L=(B*H)
         self.problem_shape_ntile_mnl = (
-            problem_shape_mbh[0],  # M tiles
-            1,  # N tiles (always 1 for FMHA)
+            problem_shape_mbh[0],  # M tile 数
+            1,  # N tile 数（FMHA 恒为 1）
             problem_shape_mbh[1] * problem_shape_mbh[2],  # L = B * H
         )
 
-        # Create layout for cluster-to-tile mapping
+        # 创建簇到 tile 的映射布局
         self.problem_layout_ncluster_mnl = cute.make_layout(
             cute.ceil_div(self.problem_shape_ntile_mnl, cluster_shape_mnk[:2]),
             loc=loc,
@@ -1932,11 +1927,11 @@ class Sm100FmhaClcDynamicTileSchedulerParams:
         return Sm100FmhaClcDynamicTileSchedulerParams(*(tuple(obj_list)), loc=self._loc)
 
     def get_grid_shape(self, *, loc=None, ip=None) -> Tuple[int, int, int]:
-        """Compute grid shape aligned with cluster shape."""
+        """计算与簇形状对齐的网格形状。"""
         return cute.round_up(self.problem_shape_ntile_mnl, self._cluster_shape_mnk)
 
     def clc_hw_params(self) -> ClcDynamicPersistentTileSchedulerParams:
-        """Return params for the upstream CLC hardware scheduler."""
+        """返回上游 CLC 硬件调度器的参数。"""
         return ClcDynamicPersistentTileSchedulerParams(
             problem_shape_ntile_mnl=self.problem_shape_ntile_mnl,
             cluster_shape_mnk=self._cluster_shape_mnk,
@@ -1944,12 +1939,14 @@ class Sm100FmhaClcDynamicTileSchedulerParams:
 
 
 class Sm100FmhaClcDynamicTileScheduler:
-    """CLC dynamic persistent tile scheduler for FMHA.
+    """FMHA 的 CLC 动态持久化 tile 调度器。
 
-    This scheduler uses Blackwell's Cluster Launch Control hardware mechanism
-    for dynamic tile distribution, providing automatic load balancing.
-    Adapted for FMHA's (M, B, H) problem shape.
+    该调度器使用 Blackwell 的 Cluster Launch Control 硬件机制进行动态
+    tile 分发，提供自动负载均衡。适配 FMHA 的 (M, B, H) 问题形状。
     """
+    # 讲解：CLC（Cluster Launch Control）是 Blackwell 的硬件级动态调度：
+    # 硬件按需把工作 tile 分配给空闲的 CTA/簇，避免软件原子计数器的争用
+    # 与调度偏差，实现接近最优的负载均衡。
 
     def __init__(
         self,
@@ -2009,10 +2006,10 @@ class Sm100FmhaClcDynamicTileScheduler:
         loc=None,
         ip=None,
     ):
-        """Create a CLC dynamic tile scheduler instance."""
+        """创建 CLC 动态 tile 调度器实例。"""
         bidx, bidy, bidz = block_idx
 
-        # CTA id in cluster
+        # 簇内的 CTA id
         cta_id_in_cluster = (
             Int32(bidx % params.cluster_shape_mn[0]),
             Int32(bidy % params.cluster_shape_mn[1]),
@@ -2037,42 +2034,42 @@ class Sm100FmhaClcDynamicTileScheduler:
         loc=None,
         ip=None,
     ) -> Tuple[int, int, int]:
-        """Get grid shape for kernel launch."""
+        """获取 kernel 启动用的网格形状。"""
         return params.get_grid_shape(loc=loc, ip=ip)
 
     def work_tile_info_from_clc_response(self, result_addr: cute.Pointer, *, loc=None, ip=None):
-        """Parse CLC response and convert to FMHA tile coordinates."""
+        """解析 CLC 响应并转换为 FMHA tile 坐标。"""
         m_idx, n_idx, l_idx, vld = cute.arch.clc_response(result_addr, loc=loc, ip=ip)
         cute.arch.fence_proxy("async.shared", space="cta")
 
-        # CLC returns first CTA coordinates: m_idx=x, l_idx=z
-        # l_idx is the L (batch) dimension; decode to (bid, hid)
+        # CLC 返回第一个 CTA 的坐标：m_idx=x, l_idx=z
+        # l_idx 是 L（batch）维；解码为 (bid, hid)
         hid = l_idx % self.params.problem_shape_mbh[2]
         bid = l_idx // self.params.problem_shape_mbh[2]
 
         cta_idx_in_cluster, cta_idy_in_cluster, _ = self.cta_id_in_cluster
         cur_tile_coord = (
-            m_idx + cta_idx_in_cluster,  # M dimension
-            0,  # N always 0 for FMHA
-            (bid, hid),  # (B, H) packed
+            m_idx + cta_idx_in_cluster,  # M 维
+            0,  # FMHA 的 N 恒为 0
+            (bid, hid),  # (B, H) 打包
         )
 
         return cutlass.utils.WorkTileInfo(cur_tile_coord, vld)
 
     def get_current_work(self, *, loc=None, ip=None):
-        """Get current work tile from CLC response."""
+        """从 CLC 响应获取当前工作 tile。"""
         return self.work_tile_info_from_clc_response(self._clc_response_ptr, loc=loc, ip=ip)
 
     def initial_work_tile_info(self, *, loc=None, ip=None):
-        """Get initial work tile based on block index."""
+        """根据块索引获取初始工作 tile。"""
         bidx, bidy, bidz = self._block_idx
-        # bidz is the L (batch) dimension; decode to (bid, hid)
+        # bidz 是 L（batch）维；解码为 (bid, hid)
         hid = bidz % self.params.problem_shape_mbh[2]
         bid = bidz // self.params.problem_shape_mbh[2]
         return cutlass.utils.WorkTileInfo((bidx, 0, (bid, hid)), True)
 
     def advance_to_next_work(self, *, loc=None, ip=None):
-        """Consumer-side advance: wait for next tile, read coordinates, release."""
+        """消费者侧推进：等待下一个 tile、读取坐标、释放。"""
         self.clc.consumer_wait(loc=loc, ip=ip)
         work = self.get_current_work(loc=loc, ip=ip)
         self.clc.consumer_release(loc=loc, ip=ip)
@@ -2080,11 +2077,11 @@ class Sm100FmhaClcDynamicTileScheduler:
         return work
 
     def prefetch_next_work(self, *, loc=None, ip=None):
-        """Producer-side: issue CLC query for next tile."""
+        """生产者侧：为下一个 tile 发起 CLC 查询。"""
         self.clc.prefetch_next_work(loc=loc, ip=ip)
 
     def producer_tail(self, *, loc=None, ip=None):
-        """Producer-side cleanup after last tile."""
+        """最后一个 tile 之后的生产者侧清理。"""
         self.clc.producer_tail(loc=loc, ip=ip)
 
     @property
@@ -2097,7 +2094,7 @@ def compute_sm100_fmha_grid_clc(
     cta_tiler: Tuple[int, int, int],
     cluster_shape_mnk: Tuple[int, int, int],
 ) -> Tuple[Sm100FmhaClcDynamicTileSchedulerParams, Tuple[int, int, int]]:
-    """Compute grid parameters for FMHA with CLC dynamic scheduling."""
+    """计算带 CLC 动态调度的 FMHA 网格参数。"""
     problem_shape_mbh = (
         cute.ceil_div(cute.size(o_shape[0]), cta_tiler[0]),
         cute.size(o_shape[2][0]),
@@ -2109,7 +2106,7 @@ def compute_sm100_fmha_grid_clc(
 
 
 ##############################################################################
-# Fused Mask
+# 融合掩码（Fused Mask）
 ##############################################################################
 
 

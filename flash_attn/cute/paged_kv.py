@@ -60,8 +60,8 @@ class PagedKVManager(ParamsBase):
         dtype: Type[cutlass.Numeric],
         arch: cutlass.Constexpr[int] = 100,
     ):
-        # SM100 transposes V in gmem to (dv, page_size, num_pages);
-        # SM90 keeps V as (page_size, dv, num_pages), same layout as K.
+        # SM100 在 gmem 中把 V 转置为 (dv, page_size, num_pages)；
+        # SM90 保持 V 为 (page_size, dv, num_pages)，与 K 布局相同。
         v_gmem_transposed = arch != 90
         universal_copy_bits = 128
         async_copy_elems = universal_copy_bits // dtype.width
@@ -86,7 +86,7 @@ class PagedKVManager(ParamsBase):
         val_layout = cute.make_layout((1, async_copy_elems))
         gmem_tiled_copy_KV = cute.make_tiled_copy_tv(atom_async_copy, thr_layout, val_layout)
         gmem_thr_copy_KV = gmem_tiled_copy_KV.get_slice(thread_idx)
-        # Include the final partially populated wave of rows.
+        # 包含最后一波未完全填充的行。
         page_entry_per_thread = (n_block_size + num_threads - 1) // num_threads
 
         tPrPage = cute.make_rmem_tensor((page_entry_per_thread,), Int32)
@@ -105,7 +105,7 @@ class PagedKVManager(ParamsBase):
         else:
             cV = cute.make_identity_tensor((n_block_size, head_dim_v_padded))
             tVcV = gmem_thr_copy_KV.partition_S(cV)
-            # When V is transposed in gmem, dv is shape[0]; otherwise dv is shape[1] (same as K)
+            # V 在 gmem 中转置时，dv 是 shape[0]；否则 dv 是 shape[1]（与 K 相同）
             V_limit = cute.size(mV_paged.shape[0 if v_gmem_transposed else 1])
             tVpV = utils.predicate_k(tVcV, limit=V_limit)
 
@@ -159,8 +159,11 @@ class PagedKVManager(ParamsBase):
     def compute_X_ptr(self, K_or_V: str, d_offset: int = 0):
         tPrXPtr = cute.make_rmem_tensor((self.page_entry_per_thread,), cutlass.Int64)
         mX = self.mK_paged if const_expr(K_or_V == "K") else self.mV_paged
-        # K is always (page_size, d, num_pages). V matches K when not transposed,
-        # but is (dv, page_size, num_pages) when transposed (SM100).
+        # 讲解：paged KV 通过页表（page table）做间接寻址 —— 每个逻辑 KV 行
+        # 用 divmod 拆成 (页号, 页内偏移)，把不连续的物理页拼成连续访问，
+        # 避免为大序列预留连续显存。
+        # K 总是 (page_size, d, num_pages)。未转置时 V 与 K 相同，
+        # 转置时（SM100）V 是 (dv, page_size, num_pages)。
         transposed = const_expr(K_or_V == "V" and self.v_gmem_transposed)
         for i in cutlass.range(self.page_entry_per_thread, unroll=1):
             page = self.tPrPage[i]
@@ -173,7 +176,7 @@ class PagedKVManager(ParamsBase):
 
     @cute.jit
     def _flatten_smem_sm100(self, sX: cute.Tensor, K_or_V: str):
-        """Flatten SM100 smem ((a,b), cta_split, k) to (a,(b,k)); transpose V to (d,page_size)."""
+        """把 SM100 的 smem ((a,b), cta_split, k) 展平为 (a,(b,k))；V 转置为 (d,page_size)。"""
         sX_pi = cute.make_tensor(
             sX.iterator,
             cute.make_layout(
@@ -194,7 +197,7 @@ class PagedKVManager(ParamsBase):
         m: Int32,
         should_load: cute.Tensor,
     ):
-        """Issue cp.async copies for one row across all k-tiles."""
+        """为一行跨所有 k-tile 发起 cp.async 拷贝。"""
         for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
             ki = tXcX[0, 0, k][1] // self.async_copy_elems
             mX_paged_cur_copy_ki = mX_paged_cur_copy[None, ki]
@@ -214,10 +217,10 @@ class PagedKVManager(ParamsBase):
         tPrXPtr = self.compute_X_ptr(K_or_V)
 
         if const_expr(self.arch == 90):
-            # SM90: sX is already stage-sliced by caller (sK[None, None, stage]).
-            # Flatten hierarchical modes to get (n_block_size, head_dim).
+            # SM90：sX 已由调用方按 stage 切片（sK[None, None, stage]）。
+            # 展平层级 mode 得到 (n_block_size, head_dim)。
             sX_pi = cute.group_modes(sX, 0, 1)
-            # SM90 does NOT transpose V here (it's transposed via utils.transpose_view before MMA)
+            # SM90 这里不转置 V（转置在 MMA 之前通过 utils.transpose_view 完成）
         else:
             sX_pi = self._flatten_smem_sm100(sX, K_or_V)
 

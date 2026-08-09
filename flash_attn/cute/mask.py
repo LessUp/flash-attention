@@ -29,7 +29,7 @@ def call_mask_mod(
     seqlen_info,
     aux_data: AuxData,
 ):
-    # Compatibility shim for pre-aux_scalars mask_mod callables.
+    # 兼容层：为引入 aux_scalars 之前的旧版 mask_mod 可调用对象提供兼容。
     if const_expr(aux_data.scalars is not None):
         return mask_mod(
             batch_idx,
@@ -52,10 +52,10 @@ def call_mask_mod(
 
 @cute.jit
 def r2p_bitmask_below(limit: Int32, s: int) -> Uint32:
-    """32-bit R2P bitmask keeping positions < limit (exclusive upper bound).
+    """32 位 R2P 位掩码，保留位置 < limit 的元素（上界不包含 limit）。
 
-    Positions 0..limit-1 in chunk `s` get bit=1 (keep), the rest bit=0 (mask).
-    Uses inline PTX to avoid shift-by-type-width UB.
+    块 `s` 中位置 0..limit-1 对应的位为 1（保留），其余位为 0（掩码）。
+    使用内联 PTX，以避免按类型位宽移位带来的未定义行为（UB）。
     """
     m = max((s + 1) * MASK_R2P_CHUNK_SIZE - limit, 0)
     return utils.shr_u32(Uint32(0xFFFFFFFF), Uint32(m))
@@ -63,10 +63,10 @@ def r2p_bitmask_below(limit: Int32, s: int) -> Uint32:
 
 @cute.jit
 def r2p_bitmask_above(limit: Int32, s: int) -> Uint32:
-    """32-bit R2P bitmask keeping positions >= limit (inclusive lower bound).
+    """32 位 R2P 位掩码，保留位置 >= limit 的元素（下界包含 limit）。
 
-    Positions limit..31 in chunk `s` get bit=1 (keep), the rest bit=0 (mask).
-    Uses inline PTX to avoid shift-by-type-width UB.
+    块 `s` 中位置 limit..31 对应的位为 1（保留），其余位为 0（掩码）。
+    使用内联 PTX，以避免按类型位宽移位带来的未定义行为（UB）。
     """
     n = max(limit - s * MASK_R2P_CHUNK_SIZE, 0)
     return utils.shl_u32(Uint32(0xFFFFFFFF), Uint32(n))
@@ -78,18 +78,20 @@ def mask_r2p_lambda(
     mask_gen_fn: cutlass.Constexpr[MaskGenFn],
     rank1: bool = False,
 ) -> None:
-    """Apply R2P masking with a custom bitmask generator.
+    """用自定义位掩码生成器应用 R2P 掩码。
 
     mask_gen_fn(chunk_idx: constexpr int) -> Uint32:
-        Returns a 32-bit bitmask for the chunk. Bit i set means column
-        chunk_idx * chunk_size + i is KEPT; bit i clear means masked to -inf.
+        返回该块的 32 位掩码。第 i 位为 1 表示列 chunk_idx * chunk_size + i 被保留；
+        第 i 位为 0 表示被掩码为 -inf。
     """
+    # 讲解：R2P（寄存器转谓词）掩码技巧 —— 一条 32 位掩码一次处理 32 列，
+    # 编译器把位测试降级为 R2P 谓词指令而非逐元素分支，显著降低掩码开销。
     ncol = const_expr(cute.size(X.shape[cute.rank(X) - 1]) if not rank1 else cute.size(X.shape))
-    # 32-column chunks. The mask_gen_fn returns a Uint32 bitmask (1=keep).
+    # 每 32 列一块。mask_gen_fn 返回 Uint32 位掩码（1=保留）。
     CHUNK_SIZE = MASK_R2P_CHUNK_SIZE
     for s in cutlass.range_constexpr(cute.ceil_div(ncol, CHUNK_SIZE)):
         mask = mask_gen_fn(s)
-        # This needs to be range_constexpr, o/w the compiler can't generate the R2P instruction
+        # 这里必须用 range_constexpr，否则编译器无法生成 R2P 指令
         for i in cutlass.range_constexpr(min(CHUNK_SIZE, ncol - s * CHUNK_SIZE)):
             in_bound = cutlass.Boolean(mask & (Uint32(1) << i))
             c = s * CHUNK_SIZE + i
@@ -102,31 +104,29 @@ def mask_r2p_lambda(
 
 @cute.jit
 def sm90_col_to_r2p_idx(col_limit: Int32) -> Int32:
-    """Transform SM90 MMA column coordinate to R2P element index.
+    """把 SM90 MMA 的列坐标转换为 R2P 元素索引。
 
-    SM90 MMA accumulator column indices are non-contiguous: 0, 1, 8, 9, 16, 17, ...
-    Element indices are contiguous: 0, 1, 2, 3, 4, 5, ...
-    This converts a column-space threshold to element-space for r2p_bitmask_below/above.
+    SM90 MMA 累加器的列索引不连续：0, 1, 8, 9, 16, 17, ...
+    元素索引是连续的：0, 1, 2, 3, 4, 5, ...
+    本函数把列空间的阈值转换为元素空间的阈值，供 r2p_bitmask_below/above 使用。
     """
     return col_limit // 8 * 2 + min(col_limit % 8, 2)
 
 
 @cute.jit
 def row_to_r2p_idx(x: Int32, num_rep: int, num_wg: int) -> Int32:
-    """Convert a row coordinate to an R2P element index in the warp-group interleaved layout.
+    """把行坐标转换为 warp-group 交错布局中的 R2P 元素索引。
 
-    In the SM100 backward pass, 2 warp groups share TMEM. The TMEM load atom
-    distributes rows in an interleaved pattern: elements 0..num_rep-1 map to
-    rows 0..num_rep-1 (warp group 0), elements num_rep..2*num_rep-1 map to
-    rows num_rep*num_wg..num_rep*num_wg+num_rep-1 (warp group 1), and so on.
-    Row-coordinate thresholds (causal limits, window bounds, uih_len) must be
-    converted to element indices before use with r2p_bitmask_above/below.
+    在 SM100 反向传播中，2 个 warp group 共享 TMEM。TMEM 加载原子指令按交错
+    模式分布行：元素 0..num_rep-1 映射到行 0..num_rep-1（warp group 0），
+    元素 num_rep..2*num_rep-1 映射到行 num_rep*num_wg..num_rep*num_wg+num_rep-1
+    （warp group 1），以此类推。行坐标阈值（causal 上限、窗口边界、uih_len）
+    必须先转换为元素索引，才能用于 r2p_bitmask_above/below。
 
-    Rows not owned by this thread (in the gap between warp groups) are clamped
-    to the boundary element index, which is safe because R2P thresholds are
-    monotonic.
+    本线程不拥有的行（位于 warp group 之间的空隙）被钳制（clamp）到边界元素
+    索引，这是安全的，因为 R2P 阈值是单调的。
 
-    Example with num_rep=16, num_wg=2:
+    num_rep=16、num_wg=2 的示例：
         row  0 -> elem  0,  row 15 -> elem 15,
         row 16 -> elem 16 (clamped), row 31 -> elem 16 (clamped),
         row 32 -> elem 16, row 33 -> elem 17, row 47 -> elem 31.
@@ -140,9 +140,9 @@ def apply_packed_mask_chunk(
     chunk_idx: cutlass.Constexpr[int],
     mask: Uint32,
 ) -> None:
-    """Apply one 32-bit keep mask to one 32-column chunk.
+    """把一条 32 位保留掩码应用到一块 32 列的 chunk 上。
 
-    The one-iteration chunk loop keeps the same lowering pattern as mask_r2p_lambda.
+    单次迭代的 chunk 循环保持了与 mask_r2p_lambda 相同的低层化（lowering）模式。
     """
     ncol = const_expr(cute.size(X.shape))
     col_base = chunk_idx * MASK_R2P_CHUNK_SIZE
@@ -162,7 +162,7 @@ class AttentionMask:
     seqlen_info: SeqlenInfoQK
     window_size_left: Optional[Int32] = None
     window_size_right: Optional[Int32] = None
-    qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1  # only pass in if we're doing PackGQA
+    qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1  # 仅在使用 PackGQA 时才传入
     swap_AB: cutlass.Constexpr[bool] = False
 
     @property
@@ -194,17 +194,16 @@ class AttentionMask:
         acc_shape = (self.tile_m, self.tile_n)
         cS = cute.make_identity_tensor(acc_shape if not self.swap_AB else acc_shape[::-1])
         tScS_mn = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(cS), transpose=self.swap_AB)
-        # We use t0ScS as these indices are known at compile time. We then must subtract the
-        # column limit by the thread column offset.
+        # 这里使用 t0ScS，因为这些索引在编译期已知；随后必须用线程列偏移减去列限制。
         t0ScS_mn = layout_utils.reshape_acc_to_mn(
             thr_mma.get_slice(0).partition_C(cS), transpose=self.swap_AB
         )
         ROW = 0 if const_expr(not self.swap_AB) else 1
         COL = 1 if const_expr(not self.swap_AB) else 0
         thr_col_offset = tScS_mn[0][COL]
-        # To handle edge cases of completely masked out rows where n_block_max = 0,
-        # we treat negative n_blocks as 0th n_block
-        # TODO: find more transparent solution
+        # 处理 n_block_max = 0 时整行被完全掩码的边界情况：
+        # 把负数 n_block 当作第 0 个 n_block 处理
+        # TODO: 寻找更透明的方案
         if n_block < 0:
             n_block = 0
         seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n - thr_col_offset
@@ -212,7 +211,7 @@ class AttentionMask:
             if const_expr(mask_seqlen):
                 r2p = const_expr(not self.swap_AB)
                 if const_expr(not r2p):
-                    # traverse column index.
+                            # 遍历列索引。
                     for c in cutlass.range(cute.size(tScS_mn.shape[1]), unroll_full=True):
                         oob = t0ScS_mn[0, c][COL] >= seqlenk_col_limit
                         for r in cutlass.range(cute.size(tScS_mn.shape[0]), unroll_full=True):
@@ -223,7 +222,7 @@ class AttentionMask:
 
         elif const_expr(
             not mask_causal and not mask_local and mask_mod is not None
-        ):  # FlexAttention mask mod
+        ):  # FlexAttention 掩码修改器
             nrow = const_expr(cute.size(tScS_mn.shape[0]))
             ncol = const_expr(cute.size(tScS_mn.shape[1]))
             has_fastdiv = const_expr(
@@ -236,7 +235,7 @@ class AttentionMask:
             )
 
             for r in cutlass.range_constexpr(nrow):
-                # Respect swap_AB: ROW/COL determine which coordinate component corresponds to Q/KV.
+                # 尊重 swap_AB：ROW/COL 决定哪个坐标分量对应 Q/KV。
                 local_row = tScS_mn[r, 0][ROW]
                 global_row_idx = local_row + m_block * self.tile_m
                 row_for_mod = global_row_idx
@@ -251,7 +250,7 @@ class AttentionMask:
 
                 for col in cutlass.range_constexpr(ncol):
                     col_idx_local = t0ScS_mn[0, col][COL]
-                    # Convert to absolute column index
+                    # 转换为绝对列索引
                     global_col_idx = thr_col_offset + col_idx_local + n_block * self.tile_n
                     col_for_mod = global_col_idx
                     if const_expr(wrap_aux_indices):
@@ -282,9 +281,9 @@ class AttentionMask:
                     else:
                         acc_S_mn[r, col] = acc_S_mn[r, col] if cond else -cutlass.Float32.inf
 
-        else:  # Causal or local
+        else:  # Causal 或 local
             if const_expr(not self.swap_AB):
-                # If PackGQA, we split the work of compute divmod among threads in the same row
+                # 若使用 PackGQA，把 divmod 的计算分摊给同一行内的多个线程
                 threads_per_row = thr_mma.tv_layout_C.shape[0][0]
                 mma_m_idx = None
                 if const_expr(self.qhead_per_kvhead_packgqa != 1):
@@ -301,9 +300,9 @@ class AttentionMask:
                     1 + self.seqlen_k - n_block * self.tile_n - self.seqlen_q - thr_col_offset
                 )
                 if const_expr(mask_causal):
-                    r2p = const_expr(not self.swap_AB)  # R2P trick, see apply_mask_sm100
+                    r2p = const_expr(not self.swap_AB)  # R2P 技巧，参见 apply_mask_sm100
                     for r in cutlass.range(cute.size(tScS_mn.shape[0]), unroll_full=True):
-                        # get the column index limit based on current row. Only consider the row index, so the column index sets to 0.
+                        # 根据当前行计算列索引上限；只考虑行索引，因此列索引设为 0。
                         if const_expr(self.qhead_per_kvhead_packgqa == 1):
                             row_idx = tScS_mn[r, 0][0] + m_block * self.tile_m
                         else:
@@ -314,7 +313,7 @@ class AttentionMask:
                         if const_expr(mask_seqlen):
                             col_limit_right = cutlass.min(col_limit_right, seqlenk_col_limit)
                         if const_expr(not r2p):
-                            # traverse column index.
+                            # 遍历列索引。
                             for c in cutlass.range(cute.size(tScS_mn.shape[1]), unroll_full=True):
                                 acc_S_mn[r, c] = (
                                     -Float32.inf
@@ -359,7 +358,7 @@ class AttentionMask:
                             else 0
                         )
                         if const_expr(not r2p_local):
-                            # traverse column index.
+                            # 遍历列索引。
                             for c in cutlass.range(cute.size(tScS_mn.shape[1]), unroll_full=True):
                                 col_idx = t0ScS_mn[0, c][1]
                                 if col_idx >= col_limit_right or col_idx < col_limit_left:
@@ -374,7 +373,7 @@ class AttentionMask:
                                 ) & r2p_bitmask_above(col_limit_left_r2p, s)
 
                             mask_r2p_lambda(acc_S_mn[r, None], mask_gen_fn, rank1=True)
-            else:  # swap_AB
+            else:  # swap_AB 情况
                 assert self.qhead_per_kvhead_packgqa == 1
                 thr_row_offset = tScS_mn[0][ROW]
                 causal_row_offset = (
@@ -383,8 +382,8 @@ class AttentionMask:
                 if const_expr(mask_causal):
                     for c in cutlass.range(cute.size(tScS_mn.shape[1]), unroll_full=True):
                         col0 = t0ScS_mn[0, c][COL]
-                        # If col0 is beyond the column limit, we want to mask out the entire
-                        # column, by setting row limit to be self.tile_m.
+                        # 若 col0 超出列限制，则通过把行上限设为 self.tile_m 来掩掉整列
+                        #（即整列置 -inf）
                         row_limit_top = (
                             self.tile_m
                             if col0 >= seqlenk_col_limit and mask_seqlen
@@ -399,8 +398,8 @@ class AttentionMask:
                 else:
                     for c in cutlass.range(cute.size(tScS_mn.shape[1]), unroll_full=True):
                         col0 = t0ScS_mn[0, c][COL]
-                        # If col0 is beyond the column limit, we want to mask out the entire
-                        # column, by setting row limit to be self.tile_m.
+                        # 若 col0 超出列限制，则通过把行上限设为 self.tile_m 来掩掉整列
+                        #（即整列置 -inf）
                         row_limit_top = (
                             self.tile_m
                             if col0 >= seqlenk_col_limit and mask_seqlen
@@ -439,12 +438,11 @@ class AttentionMask:
         head_divmod=None,
         check_q_boundary: bool = False,
     ) -> None:
-        """Apply a scalar FlexAttention mask_mod to an SM100 accumulator fragment.
+        """把标量 FlexAttention mask_mod 应用到 SM100 累加器 fragment 上。
 
-        Each accumulator lane calls mask_mod once with logical (batch, head, q, kv)
-        indices. Pack-GQA rows are converted back to logical q/head indices before
-        the call. When aux tensors are present, indices are wrapped with fastdiv so
-        mask_mod never reads outside the per-example auxiliary storage.
+        每个累加器通道用逻辑 (batch, head, q, kv) 索引调用一次 mask_mod。
+        Pack-GQA 行在调用前会被转换回逻辑 q/head 索引。存在 aux 张量时，
+        用 fastdiv 对索引做环绕，使 mask_mod 永远不会越界读取逐样本的辅助存储。
         """
         has_fastdiv = const_expr(
             fastdiv_mods is not None and fastdiv_mods[0] is not None and fastdiv_mods[1] is not None
@@ -510,12 +508,11 @@ class AttentionMask:
         head_divmod=None,
         check_q_boundary: bool = False,
     ) -> None:
-        """Apply a vectorized FlexAttention mask_mod to an SM100 fragment.
+        """把向量化的 FlexAttention mask_mod 应用到 SM100 fragment 上。
 
-        mask_mod receives vec_size adjacent KV indices for one logical q row and
-        returns bit-packed Uint32 keep masks. Low bits correspond to lower KV
-        indices. The packed masks are combined with sequence-boundary checks, then
-        applied in 32-column chunks so the final masking lowers to R2P.
+        mask_mod 接收一个逻辑 q 行的 vec_size 个相邻 KV 索引，返回按位打包的
+        Uint32 保留掩码。低位对应较小的 KV 索引。打包后的掩码与序列边界检查
+        相结合，再按 32 列 chunk 应用，使最终掩码低层化为 R2P。
         """
         has_fastdiv = const_expr(
             fastdiv_mods is not None and fastdiv_mods[0] is not None and fastdiv_mods[1] is not None
@@ -527,8 +524,8 @@ class AttentionMask:
         n_calls = const_expr(cute.ceil_div(ncol, vec_size))
         mask_vals = cute.make_rmem_tensor(mask_vals_per_apply, dtype=cutlass.Uint32)
 
-        # Accumulate enough vector mask_mod calls to produce 32-bit chunks that
-        # apply_packed_mask_chunk can lower to R2P.
+        # 累积足够的向量化 mask_mod 调用，以产生可被 apply_packed_mask_chunk
+        # 低层化为 R2P 的 32 位 chunk。
         for s in cutlass.range_constexpr(n_calls):
             if const_expr(s % calls_per_apply == 0):
                 for c in cutlass.range_constexpr(mask_vals_per_apply):
@@ -559,7 +556,7 @@ class AttentionMask:
             batch_idx_ssa_call = batch_idx_ssa.broadcast_to((vec_size,))
             kv_idx_vec = cute.make_rmem_tensor(vec_size, cutlass.Int32)
 
-            # Build the per-lane KV indices for this vectorized mask_mod call.
+            # 为这次向量化 mask_mod 调用构造每个通道的 KV 索引。
             for j in cutlass.range_constexpr(min(vec_size, ncol - i)):
                 col_j_coord = tScS_t2r[i + j][1] if not self.swap_AB else tScS_t2r[i + j][0]
                 col_j_global = col_j_coord + n_block * self.tile_n
@@ -569,7 +566,7 @@ class AttentionMask:
                 kv_idx_vec[j] = col_j_for_mod
             kv_idx_ssa = kv_idx_vec.load()
 
-            # mask_value is already bit-packed by the vectorized mask_mod.
+            # mask_value 已由向量化 mask_mod 按位打包。
             mask_value = call_mask_mod(
                 mask_mod,
                 batch_idx_ssa_call,
@@ -580,7 +577,7 @@ class AttentionMask:
                 aux_data,
             )
 
-            # For vec_size < 32, multiple mask_mod calls fill one R2P chunk.
+            # 当 vec_size < 32 时，多次 mask_mod 调用填满一个 R2P chunk。
             bit_offset = const_expr((s % calls_per_apply) * vec_size)
             seqlen_thresh_call = (
                 self.seqlen_k - global_col if const_expr(mask_seqlen) else cutlass.Int32(0)
@@ -600,14 +597,14 @@ class AttentionMask:
                     mask_val = mask_val if q_in_bounds else cutlass.Uint32(0)
                 mask_vals[c] = mask_vals[c] | (mask_val << bit_offset)
 
-            # Apply only when the 32-bit chunk is complete, or at the tile tail.
+            # 仅在 32 位 chunk 填满或到达 tile 尾部时才应用掩码。
             is_last_in_apply = const_expr(s % calls_per_apply == calls_per_apply - 1)
             is_last_overall = const_expr(s == n_calls - 1)
             if const_expr(is_last_in_apply or is_last_overall):
                 apply_idx = s // calls_per_apply
                 for c in cutlass.range_constexpr(mask_vals_per_apply):
                     chunk_idx = apply_idx * mask_vals_per_apply + c
-                    # Skip packed chunks that start past the accumulator fragment.
+                    # 跳过起始位置超出累加器 fragment 的打包 chunk。
                     if const_expr(chunk_idx * 32 < ncol):
                         apply_packed_mask_chunk(acc_S, chunk_idx, mask_vals[c])
 
@@ -639,9 +636,9 @@ class AttentionMask:
         tScS = thr_mma.partition_C(cS)
         tScS = tScS[(None, None), 0, 0]
         tScS_t2r = thr_tmem_load.partition_D(tScS)
-        # To handle edge cases of completely masked out rows where n_block_max = 0,
-        # we treat negative n_blocks as 0th n_block
-        # TODO: find more transparent solution
+        # 处理 n_block_max = 0 时整行被完全掩码的边界情况：
+        # 把负数 n_block 当作第 0 个 n_block 处理
+        # TODO: 寻找更透明的方案
         if n_block < 0:
             n_block = 0
         seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n
@@ -649,7 +646,7 @@ class AttentionMask:
         if const_expr(rBitmask is not None):
             ncol_packed = const_expr(cute.size(rBitmask.shape[0]))
             for i in cutlass.range_constexpr(ncol_packed):
-                col_start = 32 * i  # mask is bit-packed into uint32
+                col_start = 32 * i  # 掩码按位打包进 uint32
                 curr_mask_val = rBitmask[i]
                 for j in cutlass.range_constexpr(32):
                     curr_col = col_start + j
@@ -662,7 +659,7 @@ class AttentionMask:
                     for i in cutlass.range(cute.size(tScS_t2r.shape), unroll_full=True):
                         # if tScS_t2r[i][1] >= seqlenk_col_limit:
                         #     acc_S[i] = -Float32.inf
-                        # For some reason the 2 lines above generate really bad SASS
+                        # 由于某种原因，上面两行会生成非常糟糕的 SASS
                         acc_S[i] = -Float32.inf if tScS_t2r[i][1] >= seqlenk_col_limit else acc_S[i]
                 else:
                     mask_r2p_lambda(
@@ -672,9 +669,9 @@ class AttentionMask:
                     )
 
         elif const_expr(not mask_causal and not mask_local and mask_mod is not None):
-            # FlexAttention mask_mod vectorization is gated on `mask_mod.__vec_size__`.
-            # vec_size == 1 returns a scalar Boolean. vec_size > 1 returns packed
-            # Uint32 mask fragments: one word per 32 evaluated columns.
+            # FlexAttention mask_mod 的向量化由 `mask_mod.__vec_size__` 控制。
+            # vec_size == 1 时返回标量 Boolean；vec_size > 1 时返回打包的
+            # Uint32 掩码 fragment：每 32 个被求值的列对应一个 word。
             assert vec_size % 32 == 0 or 32 % vec_size == 0, (
                 "vec_size must divide 32 or be a multiple of 32"
             )
@@ -710,12 +707,15 @@ class AttentionMask:
                     check_q_boundary,
                 )
 
-        else:  # Causal or local
+        else:  # Causal 或 local
             causal_row_offset = self.seqlen_k - n_block * self.tile_n - self.seqlen_q
             row_idx = tScS_t2r[0][0] + m_block * self.tile_m
             if const_expr(self.qhead_per_kvhead_packgqa != 1):
                 row_idx = row_idx // self.qhead_per_kvhead_packgqa
             if const_expr(mask_causal):
+                # 讲解：causal 掩码在 kernel 内退化为"每行只保留对角线以左的列"：
+                # col_limit_right = row_idx + causal_row_offset，超过该列限的
+                # 元素直接置 -inf，无需额外的掩码矩阵。
                 col_limit_right = row_idx + causal_row_offset + 1
                 if const_expr(mask_seqlen):
                     col_limit_right = cutlass.min(col_limit_right, seqlenk_col_limit)
@@ -763,8 +763,8 @@ class AttentionMask:
                             else acc_S[i]
                         )
                 else:
-                    # Dual-bound R2P masking for SM100.
-                    # Masks elements where: NOT (col_limit_left <= col < col_limit_right)
+                    # SM100 的双边界 R2P 掩码。
+                    # 掩码掉满足以下条件的元素：NOT (col_limit_left <= col < col_limit_right)
 
                     def mask_gen_fn(s: int) -> Uint32:
                         return r2p_bitmask_below(col_limit_right, s) & r2p_bitmask_above(
@@ -793,40 +793,40 @@ class AttentionMask:
         check_m_boundary: bool = True,
     ) -> None:
         """
-        Backward pass: mask S = K @ Q.T where n_block tiles seqlen_k and m_block tiles seqlen_q.
+        反向传播：掩码 S = K @ Q.T，其中 n_block 分块 seqlen_k，m_block 分块 seqlen_q。
 
-        Coordinate convention:
-        - ROW corresponds to Q (m_block)
-        - COL corresponds to KV (n_block)
+        坐标约定：
+        - ROW 对应 Q（m_block）
+        - COL 对应 KV（n_block）
 
-        is_full_block: If True, skip mask_mod (all elements valid). Only apply seqlen masking.
-        check_m_boundary: If False, skip seqlen_q boundary check (optimization for non-boundary m_blocks).
-                          When iterating m_blocks in forward order, only the last m_block may be partial.
+        is_full_block: 若为 True，跳过 mask_mod（所有元素有效），只应用 seqlen 掩码。
+        check_m_boundary: 若为 False，跳过 seqlen_q 边界检查（针对非边界 m_block 的优化）。
+                          按正序迭代 m_block 时，只有最后一个 m_block 可能是部分块。
         """
         assert not (mask_causal and mask_local), "mask_causal and mask_local cannot be both True"
         ROW = 0 if const_expr(not self.swap_AB) else 1
         COL = 1 if const_expr(not self.swap_AB) else 0
-        # assert t0ScS_t2r[0][COL] == 0, "col0 == 0" # tmp comment for 2-cta bwd
+        # assert t0ScS_t2r[0][COL] == 0, "col0 == 0" # 2-cta bwd 的临时注释
         thr_col_offset = tScS_t2r[0][COL]
         seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n - thr_col_offset
 
         if const_expr(not mask_causal and not mask_local and mask_mod is not None):
-            # Block sparse case with mask_mod (backward)
+            # 带 mask_mod 的块稀疏场景（反向传播）
             #
-            # Coordinate convention: ROW → Q (m_block), COL → KV (n_block).
-            # These already account for swap_AB.
+            # 坐标约定：ROW → Q（m_block），COL → KV（n_block）。
+            # 这些已经考虑了 swap_AB。
             #
-            # FULL blocks: mask_mod returns True for all elements, so skip it.
-            #   Still need seqlen bounds check (elements may be OOB on last m_block).
-            # PARTIAL blocks: apply mask_mod element-wise, then seqlen bounds.
+            # FULL 块：mask_mod 对所有元素返回 True，因此跳过它。
+            #   仍需 seqlen 边界检查（最后一个 m_block 的元素可能越界）。
+            # PARTIAL 块：逐元素应用 mask_mod，再做 seqlen 边界检查。
             if is_full_block:
                 if const_expr(mask_seqlen):
                     if seqlenk_col_limit <= 0:
-                        # Entire tile is OOB for K
+                        # 整个 tile 对 K 来说都已越界（OOB）
                         for i in cutlass.range(cute.size(acc_S.shape), unroll_full=True):
                             acc_S[i] = -cutlass.Float32.inf
                     elif check_m_boundary:
-                        # Last m_block: check Q and K boundaries
+                        # 最后一个 m_block：检查 Q 和 K 的边界
                         ncol = const_expr(cute.size(tScS_t2r.shape))
                         for i in cutlass.range_constexpr(ncol):
                             row_coord = tScS_t2r[i][ROW]
@@ -838,7 +838,7 @@ class AttentionMask:
                             out_of_bounds = q_out_of_bounds or kv_out_of_bounds
                             acc_S[i] = -cutlass.Float32.inf if out_of_bounds else acc_S[i]
             else:
-                # Partial block
+                # 部分块
                 has_fastdiv = const_expr(
                     fastdiv_mods is not None
                     and fastdiv_mods[0] is not None
@@ -879,7 +879,7 @@ class AttentionMask:
                     acc_S[i] = acc_S[i] if cond else -cutlass.Float32.inf
 
                     if const_expr(mask_seqlen):
-                        # check_m_boundary=False skips q check for non-boundary m_blocks
+                        # check_m_boundary=False 时跳过非边界 m_block 的 q 检查
                         q_out_of_bounds = check_m_boundary and (global_q >= self.seqlen_q)
                         kv_out_of_bounds = global_kv >= self.seqlen_k
                         out_of_bounds = q_out_of_bounds or kv_out_of_bounds
@@ -890,7 +890,7 @@ class AttentionMask:
                 if seqlenk_col_limit <= 0:
                     for i in cutlass.range(cute.size(acc_S.shape), unroll_full=True):
                         acc_S[i] = -cutlass.Float32.inf
-        else:  # Causal or local
+        else:  # Causal 或 local
             thr_row_offset = tScS_t2r[0][ROW]
             seqlenq_row_limit = self.seqlen_q - m_block * self.tile_m - thr_row_offset
             causal_offset = seqlenq_row_limit - seqlenk_col_limit
@@ -900,8 +900,8 @@ class AttentionMask:
                 #     cute.printf("tidx = {}, {} {}, {} {}", tidx, tScS_t2r[0][0], tScS_t2r[0][1], tScS_t2r[1][0], tScS_t2r[1][1])
                 row_limit_top = causal_offset
                 if const_expr(mask_seqlen):
-                    # If col is beyond the column limit, we want to mask out the entire
-                    # column, by setting row limit to be self.tile_m.
+                    # 若 col 超出列限制，则通过把行上限设为 self.tile_m 来掩掉整列
+                    #（即整列置 -inf）
                     if seqlenk_col_limit <= 0:
                         row_limit_top = self.tile_m
                 r2p = True
@@ -911,7 +911,7 @@ class AttentionMask:
                             -cutlass.Float32.inf if t0ScS_t2r[i][ROW] < row_limit_top else acc_S[i]
                         )
                 else:
-                    num_rep = cute.size(tScS_t2r, mode=[0])  # 16 or 32
+                    num_rep = cute.size(tScS_t2r, mode=[0])  # 16 或 32
                     num_wg = 2
                     row_limit = row_to_r2p_idx(row_limit_top, num_rep, num_wg)
                     mask_r2p_lambda(
@@ -960,18 +960,18 @@ class AttentionMask:
 
 
 # -----------------------------------------------------------------------------
-# SM100 FMHA fused-mask policy layer (separate from generic mask primitives).
+# SM100 FMHA 融合掩码策略层（独立于通用掩码原语）。
 # -----------------------------------------------------------------------------
 
 
 class Sm100MaskEnum(enum.Enum):
-    """Enumeration of mask types for FMHA operations.
+    """FMHA 操作使用的掩码类型枚举。
 
-    - RESIDUAL_MASK: Residual mask for handling variable sequence lengths
-    - WINDOW_MASK: Window mask for attention which also includes causal and no mask
-    - WINDOW_MASK_INFERENCE: Same as the window mask, but has the limitation that the end of q is aligned with the end of k
-    - WINDOW_MASK_BWD: Window mask for backward pass
-    - WINDOW_MASK_BWD_INFERENCE: Same as the window mask for backward pass, but has the limitation that the end of q is aligned with the end of k
+    - RESIDUAL_MASK: 用于处理变长序列的残差掩码
+    - WINDOW_MASK: 注意力窗口掩码，也涵盖 causal 和无掩码情况
+    - WINDOW_MASK_INFERENCE: 与窗口掩码相同，但限定 q 的末尾与 k 的末尾对齐
+    - WINDOW_MASK_BWD: 反向传播的窗口掩码
+    - WINDOW_MASK_BWD_INFERENCE: 反向传播窗口掩码的推理版本，限定 q 与 k 的末尾对齐
     """
 
     NO_MASK = enum.auto()
@@ -979,23 +979,22 @@ class Sm100MaskEnum(enum.Enum):
     CAUSAL_MASK = enum.auto()
     WINDOW_MASK = enum.auto()
     WINDOW_MASK_INFERENCE = enum.auto()
-    # Deprecated the following types
+    # 以下类型已弃用
     WINDOW_MASK_BWD = enum.auto()
     WINDOW_MASK_BWD_INFERENCE = enum.auto()
     RESIDUAL_MASK_BWD = enum.auto()
 
 
 class Sm100FusedMask:
-    """A fused mask implementation for FMHA operations.
+    """FMHA 操作的融合掩码实现。
 
-    This class handles different types of attention masks including no mask,
-    residual mask for variable sequence lengths, and causal mask for
-    autoregressive attention patterns.
+    本类处理不同类型的注意力掩码，包括无掩码、用于变长序列的残差掩码、
+    以及用于自回归注意力模式的 causal 掩码。
 
-    The class provides methods to:
-    - Calculate trip counts for different mask types
-    - Apply masks to attention scores
-    - Handle masked and unmasked trip calculations
+    本类提供的方法：
+    - 计算不同掩码类型的迭代次数（trip count）
+    - 对注意力分数应用掩码
+    - 处理掩码与非掩码迭代次数的计算
     """
 
     def get_trip_count(
@@ -1008,27 +1007,27 @@ class Sm100FusedMask:
         window_size_right: Optional[Int32] = None,
     ) -> Int32:
         """
-        Calculate the number of trips needed for the current block.
+        计算当前块所需的迭代次数（trip count）。
 
-        The trip count depends on the mask type and the block coordinates.
-        For causal masks, it considers the autoregressive constraint.
+        迭代次数取决于掩码类型和块的坐标。对于 causal 掩码，
+        需要考虑自回归约束。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param tile_shape: Shape of the tile.
+        :param tile_shape: tile 的形状。
         :type tile_shape: cute.Shape
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Int32
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[Int32]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[Int32]
 
-        :return: Number of trips needed.
+        :return: 所需的迭代次数。
         :rtype: Int32
         """
         result = 0
@@ -1127,11 +1126,11 @@ class Sm100FusedMask:
         window_size_left: Optional[Int32] = None,
         window_size_right: Optional[Int32] = None,
     ) -> Tuple[Int32, Int32]:
-        """Return SM100-style mask boundaries for dense iteration.
+        """返回用于稠密迭代的 SM100 风格掩码边界。
 
         Returns:
-          - n_block_min_causal_local_mask: right-side masked region start
-          - n_block_min_before_local_mask: start of fully unmasked middle region
+          - n_block_min_causal_local_mask: 右侧掩码区域的起点
+          - n_block_min_before_local_mask: 完全无掩码中间区域的起点
         """
         block_info = BlockInfo(
             tile_m=tile_shape[0],
@@ -1177,21 +1176,21 @@ class Sm100FusedMask:
         window_size_right: Optional[Int32] = None,
     ) -> Int32:
         """
-        Get the start of the trip for the current block.
+        获取当前块的迭代起点（trip start）。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param tile_shape: Shape of the tile.
+        :param tile_shape: tile 的形状。
         :type tile_shape: cute.Shape
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Int32
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[Int32]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[Int32]
         """
         result = 0
@@ -1231,24 +1230,24 @@ class Sm100FusedMask:
         window_size_right: Optional[Int32] = None,
     ) -> Tuple[Int32, Int32]:
         """
-        Get the begin and end tile idx for the leading mask.
+        获取 leading 掩码的起始与结束 tile 索引。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param tile_shape: Shape of the tile.
+        :param tile_shape: tile 的形状。
         :type tile_shape: cute.Shape
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Int32
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[Int32]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[Int32]
 
-        :return: Tuple of (begin, end) tile idx for the leading mask.
+        :return: leading 掩码的 (起始, 结束) tile 索引。
         :rtype: Tuple[Int32, Int32]
         """
         offset = 0
@@ -1310,24 +1309,24 @@ class Sm100FusedMask:
         window_size_right: Optional[Int32] = None,
     ) -> Tuple[Optional[Int32], Optional[Int32]]:
         """
-        Get the begin and end tile idx for the trailing mask.
+        获取 trailing 掩码的起始与结束 tile 索引。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param tile_shape: Shape of the tile.
+        :param tile_shape: tile 的形状。
         :type tile_shape: cute.Shape
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Int32
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[Int32]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[Int32]
 
-        :return: Tuple of (begin, end) tile idx for the trailing mask.
+        :return: trailing 掩码的 (起始, 结束) tile 索引。
         :rtype: Tuple[Int32, Int32]
         """
         offset = 0
@@ -1366,7 +1365,7 @@ class Sm100FusedMask:
                 )
                 trailing_mask_end = trip_count + trip_start - 1
             else:
-                # last tile, we always apply mask on it regardless whether it's a residual tile
+                # 最后一个 tile：无论是否为残差 tile，总是对其应用掩码
                 trailing_mask_begin = trip_count + trip_start - 1
                 trailing_mask_end = trip_count + trip_start - 1
         else:
@@ -1382,7 +1381,7 @@ class Sm100FusedMask:
                     trip_count + trip_start - 1,
                 )
             else:
-                # last tile, we always apply mask on it regardless whether it's a residual tile
+                # 最后一个 tile：无论是否为残差 tile，总是对其应用掩码
                 trailing_mask_begin = trip_count + trip_start - 1
                 trailing_mask_end = trip_count + trip_start - 1
 
@@ -1399,26 +1398,26 @@ class Sm100FusedMask:
         window_size_right: Optional[Int32] = None,
     ) -> Int32:
         """
-        Calculate the number of masked trips for the leading mask.
+        计算 leading 掩码中被掩码的迭代次数。
 
-        This is used for blocks that need special handling due to masking.
+        用于因掩码而需要特殊处理的块。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param tile_shape: Shape of the tile.
+        :param tile_shape: tile 的形状。
         :type tile_shape: cute.Shape
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Int32
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[Int32]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[Int32]
 
-        :return: Number of masked trips.
+        :return: 被掩码的迭代次数。
         :rtype: Int32
         """
         result = 0
@@ -1452,28 +1451,28 @@ class Sm100FusedMask:
         rem_count: Optional[Int32] = 0,
     ) -> Int32:
         """
-        Calculate the number of masked trips for the trailing mask.
+        计算 trailing 掩码中被掩码的迭代次数。
 
-        This is used for blocks that need special handling due to masking.
+        用于因掩码而需要特殊处理的块。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param tile_shape: Shape of the tile.
+        :param tile_shape: tile 的形状。
         :type tile_shape: cute.Shape
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Int32
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[Int32]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[Int32]
-        :param rem_count: Remaining count from previous calculations.
+        :param rem_count: 前序计算剩余的迭代数。
         :type rem_count: Int32
 
-        :return: Number of masked trips.
+        :return: 被掩码的迭代次数。
         :rtype: Int32
         """
         result = 0
@@ -1527,27 +1526,26 @@ class Sm100FusedMask:
         window_size_right: Optional[Int32] = None,
     ) -> Int32:
         """
-        Calculate the number of unmasked trips for the current block.
+        计算当前块中未掩码的迭代次数。
 
-        This represents the number of trips that don't require special
-        masking treatment.
+        表示不需要特殊掩码处理的迭代次数。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param blk_coord: Block coordinates.
+        :param blk_coord: 块坐标。
         :type blk_coord: cute.Coord
-        :param tile_shape: Shape of the tile.
+        :param tile_shape: tile 的形状。
         :type tile_shape: cute.Shape
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Int32
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[Int32]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[Int32]
 
-        :return: Number of unmasked trips.
+        :return: 未掩码的迭代次数。
         :rtype: Int32
         """
         result = (
@@ -1597,31 +1595,30 @@ class Sm100FusedMask:
         ),
     ):
         """
-        Apply the appropriate mask to the attention scores.
+        对注意力分数应用合适的掩码。
 
-        This method modifies the attention scores (acc_qk) based on the mask type
-        and the positions in the index tensor.
+        本方法根据掩码类型和索引张量中的位置修改注意力分数（acc_qk）。
 
-        :param mask_type: Type of mask to use
+        :param mask_type: 要使用的掩码类型
         :type mask_type: utils.Sm100MaskEnum
-        :param acc_qk: Accumulated QK attention scores tensor.
+        :param acc_qk: QK 注意力分数的累加张量。
         :type acc_qk: cute.Tensor
-        :param index_qk: Index tensor containing position information.
+        :param index_qk: 包含位置信息的索引张量。
         :type index_qk: cute.Tensor
-        :param seqlen_k: Key sequence length for attention computation.
+        :param seqlen_k: 注意力计算中 key 的序列长度。
         :type seqlen_k: Int32
-        :param seqlen_q: Query sequence length for attention computation.
+        :param seqlen_q: 注意力计算中 query 的序列长度。
         :type seqlen_q: Optional[int]
-        :param window_size_left: Left-side sliding window size for attention masking.
+        :param window_size_left: 注意力掩码的左侧滑动窗口大小。
         :type window_size_left: Optional[int]
-        :param window_size_right: Right-side sliding window size for attention masking.
+        :param window_size_right: 注意力掩码的右侧滑动窗口大小。
         :type window_size_right: Optional[int]
         """
         offset = 0
-        # NOTE: causal masking in this repo aligns the *end* of Q with the *end* of K
-        # when seqlen_k != seqlen_q (same as the test/reference implementation):
+        # 注意：本仓库的 causal 掩码在 seqlen_k != seqlen_q 时，把 Q 的*末尾*与 K 的*末尾*对齐
+        #（与测试/参考实现一致）：
         #   k_index <= q_index + (seqlen_k - seqlen_q) + window_right
-        # In our kernels, causal is represented by (window_left is None, window_right is not None).
+        # 在我们的 kernel 中，causal 由 (window_left is None, window_right is not None) 表示。
         if cutlass.const_expr(window_size_left is None and window_size_right is not None):
             offset = seqlen_k - seqlen_q
         elif cutlass.const_expr(
@@ -1635,19 +1632,19 @@ class Sm100FusedMask:
                 if cutlass.const_expr(window_size_left is None):
                     if index_q + offset + window_size_right < index_k:
                         acc_qk[i] = -Float32.inf
-                    if index_k >= seqlen_k or index_q >= seqlen_q:  # residual mask
+                    if index_k >= seqlen_k or index_q >= seqlen_q:  # 残差掩码
                         acc_qk[i] = -Float32.inf
                 elif cutlass.const_expr(window_size_right is None):
                     if index_q + offset - window_size_left > index_k:
                         acc_qk[i] = -Float32.inf
-                    if index_k >= seqlen_k or index_q >= seqlen_q:  # residual mask
+                    if index_k >= seqlen_k or index_q >= seqlen_q:  # 残差掩码
                         acc_qk[i] = -Float32.inf
                 else:
                     max_K_index = dsl_min(index_q + offset + window_size_right, seqlen_k)
                     min_K_index = max(0, index_q + offset - window_size_left)
                     if index_k > max_K_index or index_k < min_K_index:
                         acc_qk[i] = -Float32.inf
-                    if index_k >= seqlen_k or index_q >= seqlen_q:  # residual mask
+                    if index_k >= seqlen_k or index_q >= seqlen_q:  # 残差掩码
                         acc_qk[i] = -Float32.inf
 
             if cutlass.const_expr(
@@ -1673,22 +1670,22 @@ class Sm100FusedMask:
             index_k,
         ),
     ):
-        """Apply forward mask without mask_type.
+        """在不用 mask_type 的情况下应用前向掩码。
 
-        - If apply_semantic_window=True, apply causal/local window constraints.
-        - Always apply residual OOB masking (index_k>=seqlen_k or index_q>=seqlen_q).
+        - 若 apply_semantic_window=True，应用 causal/local 窗口约束。
+        - 始终应用残差 OOB 掩码（index_k>=seqlen_k 或 index_q>=seqlen_q）。
         """
         offset = 0
         if cutlass.const_expr(apply_semantic_window):
-            # Match WINDOW_MASK_INFERENCE semantics: end-align Q/K when lengths differ.
+            # 匹配 WINDOW_MASK_INFERENCE 语义：长度不同时把 Q/K 末尾对齐。
             offset = seqlen_k - seqlen_q
         for i in cutlass.range_constexpr(cute.size(acc_qk), unroll_full=True):
             index_q, index_k = index_transform(*index_qk[i])
             if cutlass.const_expr(apply_semantic_window):
                 if cutlass.const_expr(is_causal and not is_local):
-                    # Pure causal; tolerate both external forms:
-                    # - (None, None) from interface
-                    # - (None, 0) from fused-mask-style callers
+                    # 纯 causal；兼容两种外部形式：
+                    # - (None, None) 来自 interface
+                    # - (None, 0) 来自融合掩码风格的调用方
                     right = 0 if const_expr(window_size_right is None) else window_size_right
                     if index_q + offset + right < index_k:
                         acc_qk[i] = -Float32.inf
@@ -1706,6 +1703,6 @@ class Sm100FusedMask:
                         min_K_index = max(0, index_q + offset - window_size_left)
                         if index_k > max_K_index or index_k < min_K_index:
                             acc_qk[i] = -Float32.inf
-            # Residual mask is always needed for boundary protection.
+            # 边界保护始终需要残差掩码。
             if index_k >= seqlen_k or index_q >= seqlen_q:
                 acc_qk[i] = -Float32.inf

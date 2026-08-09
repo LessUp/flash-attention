@@ -17,8 +17,8 @@ def _tcgen05_mma_kind(op: cute.nvgpu.tcgen05.mma.MmaOp) -> str:
         return "tf32"
     if isinstance(op, tcgen05.mma.MmaI8Op):
         return "i8"
-    # cutlass-dsl >=4.5.2 builds plain FP8 MMAs as MmaF8F6F4Op (make_trivial_tiled_mma's
-    # _F8F6F4_TYPES branch); <4.4.x returned the now-legacy MmaFP8Op. Both map to kind::f8f6f4.
+    # cutlass-dsl >=4.5.2 把普通 FP8 MMA 构建为 MmaF8F6F4Op（make_trivial_tiled_mma 的
+    # _F8F6F4_TYPES 分支）；<4.4.x 返回现已废弃的 MmaFP8Op。两者都映射到 kind::f8f6f4。
     if isinstance(op, (tcgen05.mma.MmaFP8Op, tcgen05.mma.MmaF8F6F4Op)):
         return "f8f6f4"
     if isinstance(op, tcgen05.mma.MmaMXF8Op):
@@ -108,7 +108,7 @@ def gemm(
 
 
 def i64_to_i32x2(i: int) -> Tuple[int, int]:
-    """Convert a 64-bit integer to a tuple of two 32-bit integers."""
+    """把 64 位整数转换为两个 32 位整数的元组。"""
     return i & 0xFFFF_FFFF, (i >> 32) & 0xFFFF_FFFF
 
 
@@ -521,8 +521,11 @@ def gemm_ptx_partial(
             asm_dialect=llvm.AsmDialect.AD_ATT,
         )
     else:
-        # For TS gemm, somehow tCrA.iterator.toint() returns 0 no matter what, so we need to
-        # explicitly pass in the tA_addr for correctness.
+        # 讲解：TS（Tensor-Stationary，张量驻留）GEMM 中 A 操作数常驻 TMEM，
+        # 因此 tCrA 指向的是 TMEM 地址而非共享内存；这也解释了为什么这里
+        # 要显式传入 tA_addr，而不能依赖迭代器推导。
+        # 不知为何，TS gemm 中 tCrA.iterator.toint() 无论怎样都返回 0，所以为了
+        # 正确性必须显式传入 tA_addr。
         tA_addr = tCrA[None, None, 0].iterator.toint() if tA_addr is None else tA_addr
         input_args = [
             # Int32(cute.arch.make_warp_uniform(tCrA[None, None, 0].iterator.toint())).ir_value(),
@@ -796,7 +799,7 @@ def gemm_ptx_partial1(
 @cute.jit
 def gemm_ptx_precomputed(
     acc_tmem_addr: Int32,
-    smem_desc_start_a: Int32,  # If TS, then this is the tmem start address for A
+    smem_desc_start_a: Int32,  # 若是 TS，这是 A 的 tmem 起始地址
     smem_desc_start_b: Int32,
     idesc: int,
     smem_desc_base_a: Optional[int],
@@ -822,7 +825,7 @@ def gemm_ptx_precomputed(
         tCrA_layout
         if const_expr(not is_ts)
         # else cute.recast_layout(32, tCrA.element_type.width, tCrA_layout)
-        # currently hard-coding the width to 16
+        # 目前把宽度硬编码为 16
         else cute.recast_layout(32, 16, tCrA_layout)
     )
     offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(num_k_tile)]
@@ -975,7 +978,7 @@ def gemm_ptx_precomputed(
 
 @cute.jit
 def declare_ptx_smem_desc(
-    smem_desc_start_a: Int32,  # If TS, then this is the tmem start address for A
+    smem_desc_start_a: Int32,  # 若是 TS，这是 A 的 tmem 起始地址
     smem_desc_base_a: Optional[int],
     tCrA_layout: cute.Layout,
     var_name_prefix: str = "smem_desc",
@@ -989,7 +992,7 @@ def declare_ptx_smem_desc(
         tCrA_layout
         if const_expr(not is_ts)
         # else cute.recast_layout(32, tCrA.element_type.width, tCrA_layout)
-        # currently hard-coding the width to 16
+        # 目前把宽度硬编码为 16
         else cute.recast_layout(32, 16, tCrA_layout)
     )
     offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(num_k_tile)]

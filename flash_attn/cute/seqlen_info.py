@@ -8,9 +8,8 @@ from cutlass import Int32, const_expr
 from quack import copy_utils
 
 """
-This consolidates all the info related to sequence length. This is so that we can do all
-the gmem reads once at the beginning of each tile, rather than having to repeat these reads
-to compute various things like n_block_min, n_block_max, etc.
+本模块汇集与序列长度相关的所有信息。这样可以在每个 tile 开始时一次性完成所有
+全局内存（gmem）读取，而不必重复读取这些值来计算诸如 n_block_min、n_block_max 等。
 """
 
 
@@ -33,7 +32,7 @@ class SeqlenInfo:
         offset_padded = (
             0
             if const_expr(cu_seqlens is None)
-            # Add divby so that the compiler knows the alignment when moving by offset_padded
+            # 加上 divby 标注，使编译器知道按 offset_padded 移动时的对齐方式
             else cute.assume((offset + batch_idx * tile) // tile * tile, divby=tile)
         )
         if const_expr(seqused is not None):
@@ -52,7 +51,7 @@ class SeqlenInfo:
         padded: cutlass.Constexpr[bool] = False,
         multiple: int = 1,
     ) -> cute.Tensor:
-        """Offset a tensor by batch index. batch dim is at position `dim`, seqlen is at dim=0."""
+        """按 batch 索引偏移张量。batch 维位于位置 `dim`，seqlen 位于 dim=0。"""
         if const_expr(not self.has_cu_seqlens):
             idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mT) - 1 - dim)
             return mT[idx]
@@ -154,7 +153,7 @@ class SeqlenInfoQK:
         padded: cutlass.Constexpr[bool] = False,
         ragged: cutlass.Constexpr[bool] = False,
     ) -> cute.Tensor:
-        """Seqlen must be the first dimension of mQ"""
+        """seqlen 必须是 mQ 的第一维"""
         if const_expr(not ragged):
             if const_expr(not self.has_cu_seqlens_q):
                 idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mQ) - 1 - dim)
@@ -177,7 +176,7 @@ class SeqlenInfoQK:
                 )
             else:  # PackGQA
                 assert cute.rank(mQ.shape[0]) == 2
-                # Unpack before calling offset_ragged_tensor, then pack
+                # 先解包再调用 offset_ragged_tensor，最后重新打包
                 idx = ((None, None),) + (None,) * (cute.rank(mQ) - 1)
                 mQ = mQ[idx]
                 mQ = copy_utils.offset_ragged_tensor(
@@ -194,7 +193,7 @@ class SeqlenInfoQK:
         ragged: cutlass.Constexpr[bool] = False,
         multiple: int = 1,
     ) -> cute.Tensor:
-        """Seqlen must be the first dimension of mK"""
+        """seqlen 必须是 mK 的第一维"""
         if const_expr(not ragged):
             if const_expr(not self.has_cu_seqlens_k):
                 idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mK) - 1 - dim)
@@ -219,15 +218,15 @@ class SeqlenInfoQK:
 
 @dataclass(frozen=True)
 class SeqlenInfoQKNewK:
-    """Sequence length info for append-KV with left-padding and new K support.
+    """附加 KV（左填充 + 新增 K）场景的序列长度信息。
 
-    Extends SeqlenInfoQK with:
-    - leftpad_k: left padding for K (tokens to skip at the start of the KV cache)
-    - offset_k_new: offset into the new K tensor
-    - seqlen_k_og: original K length (before appending new K), excluding leftpad
-    - seqlen_k_new: length of new K to append
-    - seqlen_k: total K length (seqlen_k_og + seqlen_k_new)
-    - seqlen_rotary: position for rotary embedding computation
+    在 SeqlenInfoQK 基础上扩展：
+    - leftpad_k: K 的左填充量（KV 缓存开头要跳过的 token 数）
+    - offset_k_new: 新增 K 张量中的偏移量
+    - seqlen_k_og: 原始 K 长度（追加新增 K 之前，不含左填充）
+    - seqlen_k_new: 要追加的新增 K 长度
+    - seqlen_k: K 总长度（seqlen_k_og + seqlen_k_new）
+    - seqlen_rotary: 旋转位置编码（rotary embedding）计算所用的位置
     """
 
     leftpad_k: Int32
@@ -268,7 +267,7 @@ class SeqlenInfoQKNewK:
             seqlen_q = mCuSeqlensQ[batch_idx + 1] - mCuSeqlensQ[batch_idx]
         else:
             seqlen_q = seqlen_q_static
-        # seqlen_k_og: original K length (excluding leftpad)
+        # seqlen_k_og：原始 K 长度（不含左填充）
         if const_expr(mSeqUsedK is not None):
             seqlen_k_og = mSeqUsedK[batch_idx] - leftpad_k
         elif const_expr(mCuSeqlensK is not None):
@@ -286,7 +285,7 @@ class SeqlenInfoQKNewK:
             seqlen_k_new = mCuSeqlensKNew[batch_idx + 1] - mCuSeqlensKNew[batch_idx]
         seqlen_k = seqlen_k_og if const_expr(mCuSeqlensQ is None) else seqlen_k_og + seqlen_k_new
 
-        # seqlen_rotary: defaults to seqlen_k_og + leftpad_k unless explicitly provided
+        # seqlen_rotary：默认取 seqlen_k_og + leftpad_k，除非显式提供
         if const_expr(mSeqlensRotary is not None):
             seqlen_rotary = mSeqlensRotary[batch_idx]
         else:

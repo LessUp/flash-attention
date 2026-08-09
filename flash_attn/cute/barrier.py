@@ -5,6 +5,9 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass._mlir.dialects import llvm
 
 
+# 讲解：以下是对全局内存锁的原子操作封装，用于 CTA 之间的栅栏（barrier）同步。
+# ld_acquire 带 acquire 语义：读锁值时会确保此前其他线程对相关内存的写入已经可见，
+# 与 red_release 的 release 语义配对，构成跨 CTA 的"到达-等待"（arrive-wait）同步原语。
 @dsl_user_op
 def ld_acquire(lock_ptr: cute.Pointer, *, loc=None, ip=None) -> cutlass.Int32:
     lock_ptr_i64 = lock_ptr.toint(loc=loc, ip=ip).ir_value()

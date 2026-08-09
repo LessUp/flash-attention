@@ -20,7 +20,7 @@ class BlockInfo:
     window_size_right: Optional[Int32] = None
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     num_splits: Int32 = 1
-    # If True, the scheduler packs num_splits into the top 16 bits of split_idx
+    # 若为 True，调度器将 num_splits 打包进 split_idx 的高 16 位
     pack_split_idx: cutlass.Constexpr[bool] = False
     num_n_blocks_per_split: Optional[cutlass.Constexpr[Int32]] = None
 
@@ -33,6 +33,8 @@ class BlockInfo:
         num_splits: Int32 = 1,
     ) -> Tuple[Int32, Int32]:
         n_block_max = cute.ceil_div(seqlen_info.seqlen_k, self.tile_n)
+        # 讲解：causal 或局部（local）窗口把每个 M 块允许的 N 块范围限制在上界内，
+        # 被掩码覆盖的 KV 块无需参与 GEMM，从而大幅节省计算量。
         if const_expr(self.is_causal or (self.is_local and self.window_size_right is not None)):
             m_idx_max = (m_block + 1) * self.tile_m
             if const_expr(self.qhead_per_kvhead_packgqa > 1):
@@ -50,7 +52,7 @@ class BlockInfo:
             n_block_min = cutlass.max(n_idx_left // self.tile_n, 0)
         if cutlass.const_expr(self.is_split_kv):
             if const_expr(self.pack_split_idx):
-                # Unpack num_splits from top 16 bits of split_idx (packed by scheduler)
+                # 从 split_idx 高 16 位解包 num_splits（由调度器打包）
                 num_splits = split_idx >> 16
                 split_idx = split_idx & 0xFFFF
             else:
@@ -91,10 +93,10 @@ class BlockInfo:
         split_idx: Int32 = 0,
         num_splits: Int32 = 1,
     ) -> Tuple[Int32, Int32]:
-        """Get the block range for new K tokens (append KV).
+        """获取新增 K token（追加 KV）的块范围。
 
-        First computes the full n_block range via get_n_block_min_max, then maps
-        those blocks into the new-K index space by subtracting seqlen_k_og.
+        先用 get_n_block_min_max 计算完整 n_block 范围，再通过减去
+        seqlen_k_og 将这些块映射到新增 K 的索引空间。
         """
         n_block_min, n_block_max = self.get_n_block_min_max(
             seqlen_info,
@@ -121,7 +123,7 @@ class BlockInfo:
         m_block: Int32,
         n_block_min: Int32,
     ) -> Int32:
-        """If we have separate iterations with causal or local masking at the start, where do we stop"""
+        """如果开头有使用 causal 或 local 掩码的独立迭代，那么这些迭代应在哪里停止"""
         m_idx_min = m_block * self.tile_m
         if const_expr(self.qhead_per_kvhead_packgqa > 1):
             m_idx_min = m_idx_min // self.qhead_per_kvhead_packgqa
@@ -140,7 +142,7 @@ class BlockInfo:
         m_block: Int32,
         n_block_min: Int32,
     ) -> Int32:
-        """If we have separate iterations with local masking at the end, where do we stop the non-masked iterations"""
+        """如果结尾有使用 local 掩码的独立迭代，那么非掩码迭代应在哪里停止"""
         if const_expr(not self.is_local or self.window_size_left is None):
             return n_block_min
         else:

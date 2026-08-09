@@ -13,15 +13,14 @@ import flash_attn.cute.utils as utils
 
 
 def pack_gqa_layout(T, qhead_per_kvhead, nheads_kv, head_idx):
-    """Reshape a tensor to fold qhead_per_kvhead into the seqlen dimension (mode 0).
+    """重排张量，把 qhead_per_kvhead 折叠进 seqlen 维（mode 0）。
 
-    The head dimension is at mode ``head_idx``.  Modes before it (1..head_idx-1)
-    are kept as-is (e.g. headdim for Q/O tensors), and modes after it are kept
-    as-is (e.g. batch).
+    head 维位于 mode ``head_idx``。它之前的 mode（1..head_idx-1）保持不变
+    （例如 Q/O 张量的 headdim），它之后的 mode 也保持不变（例如 batch）。
 
-    For Q/O tensors (head_idx=2):
+    Q/O 张量（head_idx=2）：
         (seqlen_q, headdim, nheads, batch, ...) -> ((qhead_per_kvhead, seqlen_q), headdim, nheads_kv, batch, ...)
-    For LSE tensors (head_idx=1):
+    LSE 张量（head_idx=1）：
         (seqlen_q, nheads, batch, ...) -> ((qhead_per_kvhead, seqlen_q), nheads_kv, batch, ...)
     """
     head_stride = T.stride[head_idx]
@@ -48,11 +47,11 @@ def make_packgqa_tiled_tma_atom(
     qhead_per_kvhead: int,
     head_idx: int,
 ):
-    # This packing and unpacking of the layout is so that we keep the same TMA dimension as usual.
-    # e.g. for (seqlen, d, nheads, b) layout, we still have 4D TMA after packing to
-    # ((nheads, seqlen), d, b).
-    # If we instead pack directly to ((qhead_per_kvhead, seqlen), d, nheads_kv, b) we'd have 5D TMA.
-    # Pack headdim and seqlen dim into 1: (seqlen, d, nheads, b) -> ((nheads, seqlen), d, b)
+    # 讲解：Pack-GQA 把 qhead_per_kvhead 个 Q head 折叠进 seqlen 维，
+    # 使一个 KV head 只加载一次即可服务多个 Q head，减少 KV 的重复读取。
+    # 这种打包/解包布局是为了保持与平时相同的 TMA 维度。
+    # 例如 (seqlen, d, nheads, b) 布局打包为 ((nheads, seqlen), d, b) 后仍是 4D TMA。
+    # 若直接打包成 ((qhead_per_kvhead, seqlen), d, nheads_kv, b) 会变成 5D TMA。
     gmem_tensor = layout_utils.select(
         gmem_tensor, [head_idx, *range(head_idx), *range(head_idx + 1, cute.rank(gmem_tensor))]
     )
@@ -64,9 +63,9 @@ def make_packgqa_tiled_tma_atom(
         op,
         gmem_tensor,
         smem_layout,
-        ((qhead_per_kvhead, cta_tiler[0] // qhead_per_kvhead), cta_tiler[1]),  # No mcast
+        ((qhead_per_kvhead, cta_tiler[0] // qhead_per_kvhead), cta_tiler[1]),  # 无多播（No mcast）
     )
-    # Unpack from ((nheads, seqlen), d, b) -> ((qhead_per_kvhead, seqlen), d, nheads_kv, b)
+    # 从 ((nheads, seqlen), d, b) 解包为 ((qhead_per_kvhead, seqlen), d, nheads_kv, b)
     T = tma_tensor
     shape_packed = (
         (qhead_per_kvhead, T.shape[0][1]),
@@ -84,15 +83,14 @@ def make_packgqa_tiled_tma_atom(
 
 
 def unpack_gqa_layout(T, qhead_per_kvhead, head_idx):
-    """Reverse of pack_gqa_layout: unfold qhead_per_kvhead from the seqlen dimension (mode 0).
+    """pack_gqa_layout 的逆操作：从 seqlen 维（mode 0）展开 qhead_per_kvhead。
 
-    The head dimension is at mode ``head_idx``.  Modes before it (1..head_idx-1)
-    are kept as-is (e.g. headdim for Q/O tensors), and modes after it are kept
-    as-is (e.g. batch).
+    head 维位于 mode ``head_idx``。它之前的 mode（1..head_idx-1）保持不变
+    （例如 Q/O 张量的 headdim），它之后的 mode 也保持不变（例如 batch）。
 
-    For Q/O tensors (head_idx=2):
+    Q/O 张量（head_idx=2）：
         ((qhead_per_kvhead, seqlen_q), headdim, nheads_kv, batch, ...) -> (seqlen_q, headdim, nheads, batch, ...)
-    For LSE tensors (head_idx=1):
+    LSE 张量（head_idx=1）：
         ((qhead_per_kvhead, seqlen_q), nheads_kv, batch, ...) -> (seqlen_q, nheads, batch, ...)
     """
     seqlen_stride = T.stride[0][1]
@@ -182,7 +180,7 @@ class PackGQA:
                         tQsQ[None, m, k],
                         pred=tQpQ[None, m, k] if cutlass.const_expr(self.check_hdim_oob) else None,
                     )
-            # We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
+            # 不需要清空 sQ 的 smem tile，因为我们只会写出有效输出
 
     @cute.jit
     def store_LSE(
@@ -214,7 +212,7 @@ class PackGQA:
                 mLSE.element_type, lse_ptr_i64, cute.AddressSpace.gmem, assumed_align=4
             )
             row = block * self.m_block_size + taccOcO_row[m][0]
-            # Only the thread corresponding to column 0 writes out the lse to gmem
+            # 只有对应列 0 的线程才把 lse 写出到 gmem
             if taccOcO[0][1] == 0 and row < seqlen * self.qhead_per_kvhead:
                 mLSE_copy = cute.make_tensor(lse_gmem_ptr, (1,))
                 mLSE_copy[0] = tLSErLSE[m]
@@ -223,7 +221,7 @@ class PackGQA:
     def store_O(
         self,
         mO: cute.Tensor,  # ((qhead_per_kvhead, seqlen_q), headdim)
-        tOrO: cute.Tensor,  # (m_block_size, head_dim_padded) split across threads according to gmem_tiled_copy
+        tOrO: cute.Tensor,  # (m_block_size, head_dim_padded) 按 gmem_tiled_copy 在线程间拆分
         gmem_tiled_copy: cute.TiledCopy,
         tidx: cutlass.Int32,
         block: cutlass.Int32,

@@ -68,10 +68,10 @@ _fa_disable_2cta_enabled: bool = os.environ.get("FA_DISABLE_2CTA", "0") == "1"
 
 
 def _is_cuda_12() -> bool:
-    """Check if the CUDA toolkit version is 12.x.
-
-    2CTA forward non-causal has a codegen regression on CUDA 12 that causes
-    ~18% slowdown compared to 1CTA. This is fixed in CUDA 13.x.
+    """检查 CUDA 工具包版本是否为 12.x。
+    
+    2CTA 前向非因果模式在 CUDA 12 上有代码生成回归，导致比 1CTA
+    慢约 18%。该问题在 CUDA 13.x 中已修复。
     """
     try:
         import torch
@@ -100,7 +100,7 @@ def _get_disable_2cta_default(is_fwd: bool = False) -> bool:
 
 
 def _compute_base_hash(func: Callable) -> str:
-    """Compute hash from source code or bytecode and closure values."""
+    """根据源码或字节码以及闭包值计算哈希。"""
     try:
         data = inspect.getsource(func).encode()
     except (OSError, TypeError):
@@ -121,17 +121,17 @@ def _compute_base_hash(func: Callable) -> str:
 def hash_callable(
     func: Callable, mixer_attrs: Tuple[str] = _MIXER_ATTRS, set_cute_hash: bool = True
 ) -> str:
-    """Hash a callable based on the source code or bytecode and closure values.
-    Fast-path: if the callable (or its __wrapped__ base) has a ``__cute_hash__``
-    attribute, that value is returned immediately as the base hash, then
-    metadata dunders are mixed in to produce the final dict-key hash.
-    set_cute_hash: whether or not to set func.__cute_hash__
+    """基于源码或字节码以及闭包值对可调用对象做哈希。
+    快速路径：若可调用对象（或其 __wrapped__ 基础）带有 ``__cute_hash__``
+    属性，则直接返回该值作为基础哈希，再混入元数据 dunder 属性
+    生成最终的字典键哈希。
+    set_cute_hash: 是否设置 func.__cute_hash__
     """
-    # Resolve base hash
+    # 解析基础哈希
     if hasattr(func, "__cute_hash__"):
         base_hash = func.__cute_hash__
     else:
-        # Unwrap decorated functions (e.g., cute.jit wrappers).
+        # 解开装饰函数（例如 cute.jit 包装器）。
         base_func = getattr(func, "__wrapped__", func)
 
         if hasattr(base_func, "__cute_hash__"):
@@ -142,7 +142,7 @@ def hash_callable(
             if set_cute_hash:
                 base_func.__cute_hash__ = base_hash
 
-    # Mix in mutable metadata dunders
+    # 混入可变元数据 dunder 属性
     mixer_values = tuple(getattr(func, attr, None) for attr in mixer_attrs)
 
     if all(v is None for v in mixer_values):
@@ -183,12 +183,12 @@ LOG2_E = math.log2(math.e)
 
 
 def compute_softmax_scale_log2(softmax_scale, score_mod):
-    """Compute softmax_scale_log2 and adjusted softmax_scale based on whether score_mod is used.
-
-    When score_mod is None, fold the log2(e) factor into softmax_scale_log2 and set softmax_scale
-    to None. When score_mod is present, keep softmax_scale separate so it can be applied before
-    the score_mod, and set softmax_scale_log2 to just the change-of-base constant.
-
+    """计算 softmax_scale_log2 和调整后的 softmax_scale，取决于是否使用 score_mod。
+    
+    当 score_mod 为 None 时，把 log2(e) 因子折进 softmax_scale_log2，并把
+    softmax_scale 设为 None。当存在 score_mod 时，保持 softmax_scale 独立，
+    以便在 score_mod 之前应用，并把 softmax_scale_log2 只设为换底常数。
+    
     Returns (softmax_scale_log2, softmax_scale).
     """
     if const_expr(score_mod is None):
@@ -198,9 +198,9 @@ def compute_softmax_scale_log2(softmax_scale, score_mod):
 
 
 def compute_fastdiv_mods(mQ, mK, qhead_per_kvhead, pack_gqa, aux_tensors, mPageTable=None):
-    """Compute FastDivmodDivisor pairs for aux_tensors index computation.
-
-    Returns a (seqlen_q_divmod, seqlen_k_divmod) tuple, or None if aux_tensors is None.
+    """计算用于 aux_tensors 索引计算的 FastDivmodDivisor 对。
+    
+    Returns 一个 (seqlen_q_divmod, seqlen_k_divmod) 元组；若 aux_tensors 为 None 则返回 None。
     """
     if const_expr(aux_tensors is None):
         return None
@@ -232,7 +232,7 @@ def convert_from_dlpack_compact_dynamic(
     divisibility: int = 1,
     enable_tvm_ffi: bool = False,
 ) -> cute.Tensor:
-    """Convert via DLPack and mark selected compact dimensions as dynamic."""
+    """通过 DLPack 转换，并把选中的紧凑维标记为动态。"""
     if isinstance(dynamic_modes, int):
         dynamic_modes = (dynamic_modes,)
     if stride_order is None:
@@ -390,8 +390,8 @@ def fmax_reduce(
         local_max[0] = fmax(local_max[0], local_max[2])
         return local_max[0] if const_expr(init_val is None) else fmax(local_max[0], init_val)
     else:
-        # [2025-06-15] x.reduce only seems to use 50% 3-input max and 50% 2-input max
-        # We instead force the 3-input max.
+        # [2025-06-15] x.reduce 似乎只用了 50% 的三输入 max 和 50% 的二输入 max
+        # 这里改为强制使用三输入 max。
         res = cute.make_rmem_tensor(x.shape, Float32)
         res.store(x)
         local_max_0 = (
@@ -495,7 +495,7 @@ def elem_pointer(x: cute.Tensor, coord: cute.Coord, *, loc=None, ip=None) -> cut
 
 @cute.jit
 def predicate_k(tAcA: cute.Tensor, limit: cutlass.Int32) -> cute.Tensor:
-    # Only compute predicates for the "k" dimension. For the mn dimension, we will use "if"
+    # 只为 "k" 维计算谓词（predicate）；对 mn 维将使用 "if"
     tApA = cute.make_rmem_tensor(
         cute.make_layout(
             (cute.size(tAcA, mode=[0, 1]), cute.size(tAcA, mode=[1]), cute.size(tAcA, mode=[2])),
@@ -547,7 +547,7 @@ def shuffle_sync(
     mask = cute.arch.WARP_SIZE - width
     clamp = cute.arch.WARP_SIZE - 1
     mask_and_clamp = mask << 8 | clamp
-    # important: need stride 1 and not 0 for recast_tensor to work
+    # 重要：recast_tensor 要正常工作，步长需要是 1 而不是 0
     val = cute.make_rmem_tensor(cute.make_layout((1,), stride=(1,)), type(value))
     val[0] = value
     val_i32 = cute.recast_tensor(val, cutlass.Int32)
@@ -559,20 +559,18 @@ def shuffle_sync(
 @dsl_user_op
 def shl_u32(val: cutlass.Uint32, shift: cutlass.Uint32, *, loc=None, ip=None) -> cutlass.Uint32:
     """
-    Left-shift val by shift bits using PTX shl.b32 (sign-agnostic).
-
-    Named ``shl_u32`` (not ``shl_b32``) because python type annotations
-    distinguish signed/unsigned.
-
-    PTX semantics (§9.7.8.8): "Shift amounts greater than the register width N
-    are clamped to N."  So ``shl.b32 d, a, 32`` is well-defined and yields 0.
-
-    This differs from C/C++ and LLVM IR, where shifting by >= the type width is
-    undefined behavior.  CuTeDSL compiles through MLIR -> LLVM IR, so a plain
-    Python-level ``Uint32(x) << Uint32(n)`` inherits LLVM's UB: the optimizer
-    may treat the result as poison and eliminate dependent code.  Inline PTX
-    bypasses the LLVM IR shift entirely — the instruction is emitted verbatim
-    into PTX where clamping makes it safe for all shift amounts.
+    用 PTX shl.b32（与符号无关）把 val 左移 shift 位。
+    
+    命名为 ``shl_u32``（而非 ``shl_b32``），因为 Python 类型标注区分有符号/无符号。
+    
+    PTX 语义（§9.7.8.8）："大于寄存器宽度 N 的移位量被钳制到 N。"
+    因此 ``shl.b32 d, a, 32`` 是有明确定义的，结果为 0。
+    
+    这与 C/C++ 和 LLVM IR 不同：在它们中，移位量 >= 类型宽度是未定义行为。
+    CuTeDSL 通过 MLIR -> LLVM IR 编译，因此普通的 Python 级
+    ``Uint32(x) << Uint32(n)`` 继承了 LLVM 的 UB：优化器可能把结果当作
+    poison 值并消除相关代码。内联 PTX 完全绕开 LLVM IR 的移位 ——
+    指令原样发射到 PTX 中，其中的钳制对所有移位量都是安全的。
     """
     return cutlass.Uint32(
         llvm.inline_asm(
@@ -593,10 +591,10 @@ def shl_u32(val: cutlass.Uint32, shift: cutlass.Uint32, *, loc=None, ip=None) ->
 @dsl_user_op
 def shr_u32(val: cutlass.Uint32, shift: cutlass.Uint32, *, loc=None, ip=None) -> cutlass.Uint32:
     """
-    Unsigned right-shift val by shift bits using PTX shr.u32 (zero-fills).
-
-    See ``shl_u32`` docstring for why inline PTX is used instead of plain
-    CuTeDSL shift operators (LLVM shift-by-type-width UB).
+    用 PTX shr.u32（零填充）把 val 无符号右移 shift 位。
+    
+    为什么用内联 PTX 而非普通 CuTeDSL 移位运算符，参见 ``shl_u32`` 的
+    docstring（LLVM 按类型位宽移位的 UB 问题）。
     """
     return cutlass.Uint32(
         llvm.inline_asm(
@@ -621,7 +619,7 @@ def warp_prefix_sum(val: cutlass.Int32, lane: Optional[cutlass.Int32] = None) ->
     # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, val = %d", cute.arch.thread_idx()[0] % 32, val)
     for i in cutlass.range_constexpr(int(math.log2(cute.arch.WARP_SIZE))):
         offset = 1 << i
-        # Very important that we set mask_and_clamp to 0
+        # 非常重要的是把 mask_and_clamp 设为 0
         partial_sum = cute.arch.shuffle_sync_up(val, offset=offset, mask_and_clamp=0)
         if lane >= offset:
             val += partial_sum
@@ -657,23 +655,23 @@ def cvt_f16(src: cute.Tensor, dtype: Type[cute.Numeric]) -> cute.Tensor: ...
 
 @cute.jit
 def cvt_f16(src: cute.Tensor, dst_or_dtype):
-    """Convert Float32 tensor to Float16/BFloat16.
-
+    """把 Float32 张量转换为 Float16/BFloat16。
+    
     Args:
-        src: Source tensor with Float32 element type
-        dst_or_dtype: Either a destination tensor or a dtype (Float16/BFloat16)
-
+        src: 元素类型为 Float32 的源张量
+        dst_or_dtype: 目标张量或目标 dtype（Float16/BFloat16）
+    
     Returns:
-        None if dst is a tensor, or a new tensor if dtype is provided
+        若 dst 是张量则返回 None；若提供 dtype 则返回新张量
     """
     if const_expr(isinstance(dst_or_dtype, type)):
-        # dtype variant: create new tensor and call the tensor variant
+        # dtype 变体：创建新张量并调用张量变体
         dtype = dst_or_dtype
         dst = cute.make_rmem_tensor(src.shape, dtype)
         cvt_f16(src, dst)
         return dst
     else:
-        # tensor variant: write to dst
+        # 张量变体：写入 dst
         dst = dst_or_dtype
         assert cute.size(dst.shape) == cute.size(src.shape), "dst and src must have the same size"
         assert cute.size(src.shape) % 2 == 0, "src must have an even number of elements"
@@ -711,7 +709,7 @@ def evaluate_polynomial_2(
 
 @dsl_user_op
 def add_round_down(x: float | Float32, y: float | Float32, *, loc=None, ip=None) -> Float32:
-    # There's probably a way to call llvm or nvvm to do this instead of ptx
+    # 可能可以调用 llvm 或 nvvm 来做这件事，而不是用 ptx
     return cutlass.Float32(
         llvm.inline_asm(
             T.f32(),
@@ -739,8 +737,8 @@ def combine_int_frac_ex2(x_rounded: Float32, frac_ex2: Float32, *, loc=None, ip=
             "mov.b32 x_rounded_i, $1;\n\t"
             "mov.b32 frac_ex_i, $2;\n\t"
             "shl.b32 x_rounded_e, x_rounded_i, 23;\n\t"
-            # add.u32 generates IMAD instruction and add.s32 generates LEA instruction
-            # IMAD uses the FMA pipeline and LEA uses the ALU pipeline, afaik
+            # add.u32 生成 IMAD 指令，add.s32 生成 LEA 指令
+            # 据我所知，IMAD 走 FMA 流水线，LEA 走 ALU 流水线
             "add.s32 out_i, x_rounded_e, frac_ex_i;\n\t"
             "mov.b32 $0, out_i;\n\t"
             "}\n",
@@ -755,31 +753,31 @@ def combine_int_frac_ex2(x_rounded: Float32, frac_ex2: Float32, *, loc=None, ip=
 @dsl_user_op
 def ex2_emulation(x: Float32, *, poly_degree: int = 3, loc=None, ip=None) -> Float32:
     assert poly_degree in POLY_EX2, f"Polynomial degree {poly_degree} not supported"
-    # We assume x <= 127.0
+    # 假设 x <= 127.0
     fp32_round_int = float(2**23 + 2**22)
     x_clamped = cute.arch.fmax(x, -127.0)
-    # We want to round down here, so that the fractional part is in [0, 1)
+    # 这里要向下取整，使小数部分落在 [0, 1)
     x_rounded = add_round_down(x_clamped, fp32_round_int, loc=loc, ip=ip)
-    # The integer floor of x is now in the last 8 bits of x_rounded
-    # We assume the next 2 ops round to nearest even. The rounding mode is important.
+    # x 的整数下取整现在位于 x_rounded 的低 8 位
+    # 假设接下来的 2 个操作四舍五入到最近的偶数。舍入模式很重要。
     x_rounded_back = x_rounded - fp32_round_int
     x_frac = x_clamped - x_rounded_back
     x_frac_ex2 = evaluate_polynomial(x_frac, POLY_EX2[poly_degree], loc=loc, ip=ip)
     return combine_int_frac_ex2(x_rounded, x_frac_ex2, loc=loc, ip=ip)
 
 
-# TODO: check that the ex2_emulation_2 produces the same SASS as the ptx version
+# TODO: 检查 ex2_emulation_2 生成的 SASS 是否与 ptx 版本相同
 @dsl_user_op
 def ex2_emulation_2(
     x: Float32, y: Float32, *, poly_degree: int = 3, loc=None, ip=None
 ) -> Tuple[Float32, Float32]:
-    # We assume x <= 127.0 and y <= 127.0
+    # 假设 x <= 127.0 且 y <= 127.0
     fp32_round_int = float(2**23 + 2**22)
     xy_clamped = (cute.arch.fmax(x, -127.0), cute.arch.fmax(y, -127.0))
-    # We want to round down here, so that the fractional part is in [0, 1)
+    # 这里要向下取整，使小数部分落在 [0, 1)
     xy_rounded = cute.arch.add_packed_f32x2(xy_clamped, (fp32_round_int, fp32_round_int), rnd="rm")
-    # The integer floor of x & y are now in the last 8 bits of xy_rounded
-    # We want the next 2 ops to round to nearest even. The rounding mode is important.
+    # x 和 y 的整数下取整现在位于 xy_rounded 的低 8 位
+    # 希望接下来的 2 个操作四舍五入到最近的偶数。舍入模式很重要。
     xy_rounded_back = quack.activation.sub_packed_f32x2(
         xy_rounded, (fp32_round_int, fp32_round_int)
     )
@@ -842,7 +840,7 @@ def domain_offset_aligned(
     coord: cute.Coord, tensor: cute.Tensor, *, loc=None, ip=None
 ) -> cute.Tensor:
     assert isinstance(tensor.iterator, cute.Pointer)
-    # We assume that applying the offset does not change the pointer alignment
+    # 假设施加偏移不会改变指针的对齐
     new_ptr = cute.make_ptr(
         tensor.element_type,
         elem_pointer(tensor, coord).toint(),
@@ -856,7 +854,7 @@ def domain_offset_aligned(
 def warp_reduction(
     val: cute.Numeric, op: Callable, *, threads_in_group: int = 32, loc=None, ip=None
 ) -> cute.Numeric:
-    """Warp-wide reduction helper for a custom binary op."""
+    """自定义二元运算的 warp 级归约辅助函数。"""
     offset = threads_in_group // 2
     while offset > 0:
         val = op(
@@ -879,7 +877,7 @@ warp_reduction_sum = partial(warp_reduction, op=lambda x, y: x + y)  # noqa: FUR
 def make_cotiled_copy(
     atom: cute.CopyAtom, atom_layout_tv: cute.Layout, data_layout: cute.Layout, *, loc=None, ip=None
 ) -> cute.TiledCopy:
-    """Compatibility wrapper for deprecated CuTeDSL `make_cotiled_copy`."""
+    """已废弃 CuTeDSL `make_cotiled_copy` 的兼容包装。"""
     assert cute.is_static(atom_layout_tv.type), "atom_layout_tv must be static"
     assert cute.is_static(data_layout.type), "data_layout must be static"
 
@@ -940,20 +938,20 @@ def make_cotiled_copy(
 
 @cute.jit
 def scalar_to_ssa(a: cute.Numeric, dtype) -> cute.TensorSSA:
-    """Convert a scalar to a cute TensorSSA of shape (1,) and given dtype"""
+    """把标量转换为形状为 (1,) 且给定 dtype 的 cute TensorSSA"""
     vec = cute.make_rmem_tensor(1, dtype)
     vec[0] = a
     return vec.load()
 
 
 def ssa_to_scalar(val):
-    """Could inline but nice for reflecting the above api"""
+    """可以内联，但保留以镜像上面的 API"""
     return val[0]
 
 
 @cute.jit
 def get_batch_from_cu_tensor(idx: Int32, cu_tensor: cute.Tensor) -> Int32:
-    """Binary search to determine batch from packed index in a cumulative tensor"""
+    """在累积张量中用二分查找从打包索引确定 batch"""
     batch_size = cute.size(cu_tensor) - 1
     lo = Int32(0)
     hi = batch_size
@@ -974,7 +972,7 @@ def as_bshkrd_tensor(
     h_r: Int32,
     varlen: bool,
 ) -> cute.Tensor:
-    """Normalize (B,S,H,D)/(S,H,D) tensors to (B,S,H_k,H_r,D) view."""
+    """把 (B,S,H,D)/(S,H,D) 张量归一化为 (B,S,H_k,H_r,D) 视图。"""
     if cutlass.const_expr(cute.rank(tensor.layout) == 5):
         return tensor
     if cutlass.const_expr(cute.rank(tensor.layout) == 4):
@@ -1015,7 +1013,7 @@ def as_shhb_tensor(
     b: Int32,
     varlen: bool,
 ) -> cute.Tensor:
-    """Normalize (B,H,S)/(H,S) tensors to (S, ((H_r, H_k), B)) view."""
+    """把 (B,H,S)/(H,S) 张量归一化为 (S, ((H_r, H_k), B)) 视图。"""
     if cutlass.const_expr(cute.rank(tensor.layout) == 3):
         return cute.make_tensor(
             tensor.iterator,

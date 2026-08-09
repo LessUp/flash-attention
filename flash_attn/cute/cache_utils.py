@@ -1,4 +1,4 @@
-# Manage Ahead-of-Time (AOT) compiled kernels
+# 管理预编译（AOT）的 kernel
 import fcntl
 import hashlib
 import os
@@ -19,10 +19,10 @@ import tvm_ffi
 from cutlass.cutlass_dsl import JitCompiledFunction
 from flash_attn.cute.fa_logging import fa_log
 
-# Pre-load cute DSL runtime libraries with RTLD_GLOBAL so that their symbols
-# (e.g. _cudaLibraryLoadData) are visible to .so modules loaded later via dlopen.
-# Upstream cute.runtime.load_module loads these without RTLD_GLOBAL, which causes
-# "undefined symbol" errors when loading cached kernels from disk.
+# 用 RTLD_GLOBAL 预加载 cute DSL 运行时库，使它们的符号（例如 _cudaLibraryLoadData）
+# 对之后通过 dlopen 加载的 .so 模块可见。
+# 上游 cute.runtime.load_module 加载这些库时没有使用 RTLD_GLOBAL，
+# 这会导致从磁盘加载缓存 kernel 时出现 "undefined symbol" 错误。
 for _lib_path in cute.runtime.find_runtime_libraries(enable_tvm_ffi=False):
     if Path(_lib_path).exists():
         ctypes.CDLL(_lib_path, mode=ctypes.RTLD_GLOBAL)
@@ -30,12 +30,12 @@ for _lib_path in cute.runtime.find_runtime_libraries(enable_tvm_ffi=False):
 CompileKeyType: TypeAlias = tuple[Hashable, ...]
 CallableFunction: TypeAlias = JitCompiledFunction | tvm_ffi.Function
 
-# Enable cache via `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1`
+# 通过 `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1` 启用缓存
 CUTE_DSL_CACHE_ENABLED: bool = os.getenv("FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED", "0") == "1"
 
 
-# Customize cache dir via `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR`, default is
-# `/tmp/${USER}/flash_attention_cute_dsl_cache``
+# 通过 `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` 自定义缓存目录，默认为
+# `/tmp/${USER}/flash_attention_cute_dsl_cache`
 CUTE_DSL_CACHE_DIR: str | None = os.getenv("FLASH_ATTENTION_CUTE_DSL_CACHE_DIR", None)
 
 
@@ -51,14 +51,14 @@ def get_cache_path() -> Path:
 @lru_cache(maxsize=1)
 def _compute_source_fingerprint() -> str:
     """
-    Hash all CuTe Python sources plus runtime ABI stamps into a short fingerprint.
-
-    The fingerprint changes whenever:
-    - Any .py file under flash_attn/cute is added, removed, renamed, or modified.
-    - The Python minor version changes (e.g. 3.13 -> 3.14).
-    - The cutlass or tvm_ffi package version changes.
-
-    Computed once per process and cached.
+    把全部 CuTe Python 源码加上运行时 ABI 戳，哈希成一个短指纹（fingerprint）。
+    
+    以下变化会使指纹改变：
+    - flash_attn/cute 下任何 .py 文件被新增、删除、重命名或修改。
+    - Python 次版本号变化（例如 3.13 -> 3.14）。
+    - cutlass 或 tvm_ffi 包版本变化。
+    
+    每个进程只计算一次并缓存。
     """
     cute_root = Path(__file__).resolve().parent
     h = hashlib.sha256()
@@ -79,14 +79,14 @@ def _compute_source_fingerprint() -> str:
 
 
 class FileLock:
-    """Context manager for advisory file locks using fcntl.flock.
-
-    Supports exclusive (write) and shared (read) locks.
-    Always blocks with polling until the lock is acquired or timeout is reached.
-
-    Usage:
+    """用 fcntl.flock 实现建议性文件锁的上下文管理器。
+    
+    支持排他（写）锁和共享（读）锁。
+    始终以轮询方式阻塞，直到获取到锁或超时。
+    
+    用法：
         with FileLock(lock_path, exclusive=True, timeout=15, label="abc"):
-            # do work under lock
+            # 在锁保护下工作
     """
 
     def __init__(
@@ -98,10 +98,10 @@ class FileLock:
     ):
         """
         Args:
-            lock_path: Path to the lock file on disk.
-            exclusive: True for exclusive (write) lock, False for shared (read) lock.
-            timeout: Max seconds to wait for lock acquisition before raising RuntimeError.
-            label: Optional human-readable label for error messages.
+            lock_path: 磁盘上锁文件的路径。
+            exclusive: True 表示排他（写）锁，False 表示共享（读）锁。
+            timeout: 获取锁前最多等待的秒数，超时抛出 RuntimeError。
+            label: 错误消息中可选的人类可读标签。
         """
         self.lock_path: Path = lock_path
         self.exclusive: bool = exclusive
@@ -148,7 +148,7 @@ class FileLock:
 
 class JITCache:
     """
-    In-memory cache for compiled functions.
+    已编译函数的内存缓存。
     """
 
     def __init__(self):
@@ -165,15 +165,15 @@ class JITCache:
 
     def clear(self) -> None:
         """
-        Clear in-memory cache of compiled functions
+        清空已编译函数的内存缓存
         """
         self.cache.clear()
 
 
 class JITPersistentCache(JITCache):
     """
-    In-memory cache for compiled functions, which is also backed by persistent storage.
-    Use cutedsl ahead-of-time (AOT) compilation, only supporting enable_tvm_ffi=True
+    已编译函数的内存缓存，同时由持久化存储备份。
+    使用 cutedsl 预编译（AOT），仅支持 enable_tvm_ffi=True
     """
 
     EXPORT_FUNCTION_PREFIX = "func"
@@ -189,22 +189,22 @@ class JITPersistentCache(JITCache):
         self._try_export_to_storage(key, fn)
 
     def __getitem__(self, key: CompileKeyType) -> CallableFunction:
-        # Use __contains__ to try populating in-memory cache with persistent storage
+        # 用 __contains__ 尝试用持久化存储填充内存缓存
         self.__contains__(key)
         return JITCache.__getitem__(self, key)
 
     def __contains__(self, key: CompileKeyType) -> bool:
-        # Checks in-memory cache first, then tries loading from storage.
-        # When returning True, guarantees the in-memory cache is populated.
+        # 先查内存缓存，再尝试从存储加载。
+        # 返回 True 时，保证内存缓存已被填充。
         if JITCache.__contains__(self, key):
             return True
         return self._try_load_from_storage(key)
 
     def _try_load_from_storage(self, key: CompileKeyType) -> bool:
         """
-        Try to load a function from persistent storage into in-memory cache.
-        Returns True if loaded successfully, False if not found on disk.
-        Holds a shared lock during loading to prevent concurrent writes.
+        尝试从持久化存储把函数加载进内存缓存。
+        加载成功返回 True，磁盘上不存在则返回 False。
+        加载期间持有共享锁，防止并发写入。
         """
         sha256_hex = self._key_to_hash(key)
         obj_path = self.cache_path / f"{sha256_hex}.o"
@@ -225,7 +225,7 @@ class JITPersistentCache(JITCache):
         return False
 
     def _try_export_to_storage(self, key: CompileKeyType, fn: JitCompiledFunction) -> None:
-        """Export a compiled function to persistent storage under exclusive lock."""
+        """在排他锁保护下把已编译函数导出到持久化存储。"""
         sha256_hex = self._key_to_hash(key)
         with FileLock(
             self._lock_path(sha256_hex),
@@ -235,7 +235,7 @@ class JITPersistentCache(JITCache):
         ):
             obj_path = self.cache_path / f"{sha256_hex}.o"
             if obj_path.exists():
-                # Another process already exported.
+                # 另一个进程已经导出过了。
                 fa_log(1, f"Skipping export, already on disk: {obj_path}")
                 return
             fa_log(1, f"Exporting compiled function to disk: {obj_path}")
@@ -253,7 +253,7 @@ class JITPersistentCache(JITCache):
 
     def clear(self) -> None:
         """
-        Not only clear the in-memory cache. Also purge persistent compilation cache.
+        不仅清空内存缓存，还会清除持久化编译缓存。
         """
         fa_log(1, f"Clearing persistent cache at {self.cache_path}")
         super().clear()
@@ -263,12 +263,11 @@ class JITPersistentCache(JITCache):
 
 def get_jit_cache(name: str | None = None) -> JITCache:
     """
-    JIT cache factory.
-    `name` is an optional identifier to create subdirectories to manage cache.
-
-    When persistent caching is enabled, artifacts are namespaced under a
-    source fingerprint directory so that code or dependency changes
-    automatically invalidate stale entries.
+    JIT 缓存工厂。
+    `name` 是可选标识符，用于创建子目录来管理缓存。
+    
+    启用持久化缓存时，产物按源码指纹目录做命名空间隔离，因此代码或
+    依赖变化会自动使过期条目失效。
     """
     if CUTE_DSL_CACHE_ENABLED:
         path = get_cache_path() / _compute_source_fingerprint()

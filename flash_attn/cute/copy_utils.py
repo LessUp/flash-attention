@@ -148,7 +148,7 @@ def atomic_add_fp32x4(
 def set_block_rank(
     smem_ptr: cute.Pointer, peer_cta_rank_in_cluster: Int32, *, loc=None, ip=None
 ) -> Int32:
-    """Map the given smem pointer to the address at another CTA rank in the cluster."""
+    """把给定的 smem 指针映射到簇中另一个 CTA rank 的地址。"""
     smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
     return Int32(
         llvm.inline_asm(

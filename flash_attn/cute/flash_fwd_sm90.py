@@ -1,5 +1,5 @@
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
-# SM90 (Hopper) forward pass for flash attention, extracted from flash_fwd.py.
+# SM90（Hopper）FlashAttention 前向内核，从 flash_fwd.py 中抽取出来。
 
 from types import SimpleNamespace
 from typing import Callable, Literal, Optional
@@ -109,7 +109,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             warpgroup.OperandMajorMode.K,
             warpgroup.OperandMajorMode.MN,
             Float32,
-            atom_layout_mnk=(self.tile_m // 64, 1, 1),  # Might need (1, 2, 1) for hdim 512
+            atom_layout_mnk=(self.tile_m // 64, 1, 1),  # hdim 为 512 时可能需要 (1, 2, 1)
             tiler_mn=(64, self.tile_hdimv),
             a_source=warpgroup.OperandSource.RMEM
             if self.mma_pv_is_rs
@@ -128,7 +128,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         sQV_struct = cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sQV], 1024]
         cosize_sP = cute.cosize(self.sP_layout) if const_expr(self.sP_layout is not None) else 0
         sP_struct = cute.struct.Align[cute.struct.MemRange[self.dtype, cosize_sP], 1024]
-        # 1 stage * 2 for Q pipeline (full + empty), self.num_stages*2 for K, self.num_stages*2 for V,
+        # Q 流水线需要 1 阶段 * 2（满 + 空），K/V 各需要 self.num_stages*2：
         mbar_ptr_Q_struct = cute.struct.MemRange[cutlass.Int64, 1 * 2]
         mbar_ptr_K_struct = cute.struct.MemRange[cutlass.Int64, self.num_stages * 2]
         mbar_ptr_V_struct = cute.struct.MemRange[cutlass.Int64, self.num_stages * 2]
@@ -157,10 +157,10 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
     @cute.jit
     def __call__(
         self,
-        mQ: cute.Tensor,  # (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
-        mK: cute.Tensor,  # (b_k, s_k, h_k, d) or (total_k, h_k, d) if there is cu_seqlens_k or (num_pages, page_size, h_k, d) if there is page_table
-        mV: cute.Tensor,  # (b_k, s_k, h_k, dv) or (total_k, h_k, dv) if there is cu_seqlens_k or (num_pages, page_size, h_k, dv) if there is page_table
-        mO: cute.Tensor,  # (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
+        mQ: cute.Tensor,  # (b, s_q, h, d)；若有 cu_seqlens_q 则为 (total_q, h, d)
+        mK: cute.Tensor,  # (b_k, s_k, h_k, d)；若有 cu_seqlens_k 则为 (total_k, h_k, d)；若有 page_table 则为 (num_pages, page_size, h_k, d)
+        mV: cute.Tensor,  # (b_k, s_k, h_k, dv)；若有 cu_seqlens_k 则为 (total_k, h_k, dv)；若有 page_table 则为 (num_pages, page_size, h_k, dv)
+        mO: cute.Tensor,  # (b, s_q, h, dv)；若有 cu_seqlens_q 则为 (total_q, h, dv)
         mLSE: Optional[cute.Tensor],
         softmax_scale: Float32,
         mCuSeqlensQ: Optional[cute.Tensor] = None,
@@ -175,13 +175,13 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         aux_data: AuxData = AuxData(),
         mCuTotalMBlocks: Optional[cute.Tensor] = None,
         mCuTotalSplitsMBlocks: Optional[cute.Tensor] = None,
-        # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
+        # 务必把 stream 放在最后一个参数（EnvStream：通过 TVM FFI 隐式获得）。
         stream: cuda.CUstream = None,
     ):
-        """Configures and launches the flash attention kernel.
+        """配置并启动 FlashAttention 前向内核。
 
-        mQ/mK/mV/mO has same data types(supports fp16 and bf16) and same layout:
-        (batch_size, seqlen_q, num_head, head_dim):(_, _, _, 1)
+        mQ/mK/mV/mO 具有相同的数据类型（支持 fp16 和 bf16）和相同的布局：
+        (batch_size, seqlen_q, num_head, head_dim):(_, _, _, 1)（最后一维连续）
         """
 
         self._check_type(
@@ -212,7 +212,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         assert self.num_wg_mma in [1, 2, 3]
         self.num_threads = self.num_threads_per_warp_group * (self.num_wg_mma + 1)
         self.num_producer_threads = 32
-        self.num_Q_load_threads = self.num_threads_per_warp_group  # If not TMA_Q
+        self.num_Q_load_threads = self.num_threads_per_warp_group  # 若未使用 TMA_Q
         self.num_epilogue_threads = self.num_mma_threads
         self.num_mma_regs, self.num_producer_regs = {1: (256, 56), 2: (240, 24), 3: (160, 32)}[
             self.num_wg_mma
@@ -228,12 +228,12 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             self.pack_gqa and self.tile_m % self.qhead_per_kvhead != 0
         )
         self.use_tma_O = self.use_tma_Q
-        # Producer needs more registers when doing cp.async Q or KV loads
+        # 使用 cp.async 加载 Q 或 KV 时，生产者需要更多寄存器
         if const_expr(self.num_wg_mma == 2 and (not self.use_tma_Q or not self.use_tma_KV)):
             self.num_mma_regs, self.num_producer_regs = 224, 40
         self.rescale_O_before_gemm = self.tile_hdimv > 128 and self.intra_wg_overlap
         self._setup_attributes()
-        # TODO: we prob don't need most of what's in _setup_attributes
+        # TODO: _setup_attributes 里的大部分内容可能都不需要了
         self.sQ_layout, self.sK_layout, self.sV_layout, self.sO_layout = [
             sm90_utils.make_smem_layout(mX.element_type, LayoutEnum.ROW_MAJOR, shape, stage)
             for mX, shape, stage in [
@@ -259,9 +259,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             if const_expr(mLSE is not None):
                 mLSE = pack_gqa_layout(mLSE, self.qhead_per_kvhead, nheads_kv, head_idx=1)
 
-        # TMA
+        # TMA（张量内存加速器，Tensor Memory Accelerator）
         gmem_tiled_copy_Q = cpasync.CopyBulkTensorTileG2SOp()
-        gmem_tiled_copy_KV = cpasync.CopyBulkTensorTileG2SOp()  # Might multicast
+        gmem_tiled_copy_KV = cpasync.CopyBulkTensorTileG2SOp()  # 可能做多播（multicast）
         gmem_tiled_copy_O = cpasync.CopyBulkTensorTileS2GOp()
         self.tma_copy_bytes = {
             name: cute.size_in_bytes(mX.element_type, cute.select(layout, mode=[0, 1]))
@@ -282,7 +282,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 gmem_tiled_copy_Q,
                 mQ_og if const_expr(self.pack_gqa) else mQ,
                 self.sQ_layout,
-                (self.tile_m, self.tile_hdim),  # No mcast
+                (self.tile_m, self.tile_hdim),  # 不做多播（mcast）
             )
         tma_atom_K, tma_tensor_K = None, None
         tma_atom_V, tma_tensor_V = None, None
@@ -292,14 +292,14 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 mK,
                 cute.select(self.sK_layout, mode=[0, 1]),
                 (self.tile_n, self.tile_hdim),
-                1,  # No mcast for now
+                1,  # 暂时不做多播（mcast）
             )
             tma_atom_V, tma_tensor_V = cpasync.make_tiled_tma_atom(
                 gmem_tiled_copy_KV,
                 mV,
                 cute.select(self.sV_layout, mode=[0, 1]),
                 (self.tile_n, self.tile_hdimv),
-                1,  # No mcast for now
+                1,  # 暂时不做多播（mcast）
             )
         tma_atom_O, tma_tensor_O = None, None
         if const_expr(self.use_tma_O):
@@ -312,10 +312,10 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 gmem_tiled_copy_O,
                 mO_tma,
                 self.sO_layout,
-                (self.tile_m, self.tile_hdimv),  # No mcast
+                (self.tile_m, self.tile_hdimv),  # 不做多播（mcast）
             )
         if const_expr(mCuSeqlensQ is not None or mSeqUsedQ is not None):
-            # TODO: dispatch to DynamicPersistentVarlenScheduler when appropriate
+            # TODO: 适当时机分发到 DynamicPersistentVarlenScheduler
             TileScheduler = SingleTileVarlenScheduler
         else:
             TileScheduler = (
@@ -329,7 +329,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             cute.size(mQ.shape[3])
             if const_expr(mCuSeqlensQ is None)
             else cute.size(mCuSeqlensQ.shape[0] - 1),
-            1,  # num_splits
+            1,  # num_splits（本内核不使用 SplitKV）
             cute.size(mK.shape[0])
             if const_expr(mPageTable is None)
             else mK.shape[0] * mPageTable.shape[1],
@@ -444,7 +444,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         fastdiv_mods=None,
     ):
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-        # Prefetch tma descriptor
+        # 预取 TMA 描述符
+        # 讲解：TMA 拷贝需要描述符（descriptor）；warp 0 提前把 Q/K/V/O 的 TMA 描述符预取到缓存，
+        # 以降低首次发起 TMA 拷贝的延迟。
         if warp_idx == 0:
             for tma_atom in (tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_O):
                 if const_expr(tma_atom is not None):
@@ -453,7 +455,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
-        # Mbarrier / pipeline init
+        # mbarrier / 流水线（pipeline）初始化
         mbar_ptr_Q = storage.mbar_ptr_Q.data_ptr()
 
         ThreadCooperativeGroup = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
@@ -517,11 +519,11 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 syncwarp_before_release=False,
             )
 
-        # Cluster arrive after barrier init
+        # barrier 初始化完成后，集群（cluster）到达（arrive）
         pipeline_init_arrive(cluster_shape_mn=self.cluster_shape_mn, is_relaxed=True)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Get shared memory buffer
+        # 获取共享内存缓冲区
         # ///////////////////////////////////////////////////////////////////////////////
         sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)
         sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)
@@ -531,12 +533,12 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             sV = storage.sQ.get_tensor(
                 sV_layout.outer, swizzle=sV_layout.inner, dtype=mV.element_type
             )
-        # Transpose view of V to tensor with layout (head_dim_v, tile_n) for tiled mma
+        # 把 V 转置成布局 (head_dim_v, tile_n) 的视图，供 tiled mma 使用
         sVt = layout_utils.transpose_view(sV)
         sP = None
         if const_expr(sP_layout is not None):
             sP = storage.sP.get_tensor(sP_layout.outer, swizzle=sP_layout.inner)
-        # reuse sQ's data iterator
+        # 复用 sQ 的数据迭代器（O 与 Q 共享同一块共享内存）
         sO = storage.sQ.get_tensor(sO_layout.outer, swizzle=sO_layout.inner, dtype=self.dtype)
 
         block_info = BlockInfo(
@@ -544,7 +546,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             self.tile_n,
             self.is_causal,
             self.is_local,
-            False,  # is_split_kv
+            False,  # is_split_kv（本内核不使用 SplitKV）
             window_size_left,
             window_size_right,
             qhead_per_kvhead_packgqa=self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
@@ -567,7 +569,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 if blocksparse_tensors is not None
                 else None
             ),
-            # Don't need to pass in tile_mn because we won't access offset_padded
+            # 不需要传入 tile_mn，因为这里不会访问 offset_padded
         )
         AttentionMaskCls = partial(
             AttentionMask,
@@ -579,10 +581,13 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         )
         TileSchedulerCls = partial(TileScheduler.create, tile_sched_params)
 
-        # Cluster wait before starting
+        # 开始前集群等待（wait）
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)
 
-        if warp_idx < 4:  # Producer
+        # 讲解：生产者/消费者（Producer/Consumer）分工——前 4 个 warp（128 线程）作为 producer，
+        # 用 TMA/cp.async 把 Q/K/V 从 gmem 搬运到 smem；其余线程作为 consumer，执行
+        # QK^T GEMM、online softmax 与 PV GEMM。二者通过 mbarrier 流水线同步。
+        if warp_idx < 4:  # Producer（生产者）
             cute.arch.setmaxregister_decrease(self.num_producer_regs)
             self.load(
                 mQ,
@@ -605,10 +610,10 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 TileSchedulerCls,
             )
 
-        else:  # Consumer
+        else:  # Consumer（消费者）
             cute.arch.setmaxregister_increase(self.num_mma_regs)
             # ///////////////////////////////////////////////////////////////////////////////
-            # Tile MMA compute thread partitions and allocate accumulators
+            # 划分 MMA 计算的线程分区，并分配累加器（accumulator）
             # ///////////////////////////////////////////////////////////////////////////////
             tidx, _, _ = cute.arch.thread_idx()
             tidx = tidx - 128
@@ -665,10 +670,10 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
         tidx, _, _ = cute.arch.thread_idx()
 
-        # TMA: only warp 0 loads. cp_async: all warps load.
-        # When not use_tma_Q, all 128 producer threads participate in Q loading.
+        # TMA 模式：只有 warp 0 负责加载；cp_async 模式：所有 warp 都参与加载。
+        # 当未启用 TMA_Q 时，全部 128 个生产者线程都参与 Q 的加载。
         is_load_warp = warp_idx_in_wg == 0 or const_expr(not self.use_tma_KV or not self.use_tma_Q)
-        # KV loading restricted to warp 0 for TMA, all warps for non-TMA KV
+        # KV 加载在 TMA 模式下限制为 warp 0，非 TMA 模式下所有 warp 参与
         is_kv_load_warp = warp_idx_in_wg == 0 or const_expr(not self.use_tma_KV)
 
         if is_load_warp:
@@ -698,15 +703,15 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 tma_load_K_fn = None
                 tma_load_V_fn = None
                 if const_expr(self.use_tma_KV):
-                    # === TMA path (non-paged and paged with page_size == n_block_size) ===
+                    # === TMA 路径（非分页，以及 page_size == n_block_size 的分页）===
                     if const_expr(mPageTable is not None):
-                        # Paged TMA: keep page dimension indexable
+                        # 分页 TMA：保持 page 维度可索引
                         mK_cur = mK[None, None, head_idx_kv, None]
                         mV_cur = mV[None, None, head_idx_kv, None]
                         gK = cute.local_tile(mK_cur, (self.tile_n, self.tile_hdim), (0, 0, None))
                         gV = cute.local_tile(mV_cur, (self.tile_n, self.tile_hdimv), (0, 0, None))
                     else:
-                        # Non-paged TMA
+                        # 非分页 TMA
                         mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
                             None, None, head_idx_kv
                         ]
@@ -715,7 +720,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         ]
                         gK = cute.local_tile(mK_cur, (self.tile_n, self.tile_hdim), (None, 0))
                         gV = cute.local_tile(mV_cur, (self.tile_n, self.tile_hdimv), (None, 0))
-                    # TODO: mcast
+                    # TODO: 多播（mcast）
                     tma_load_K_fn, _, _ = copy_utils.tma_get_copy_fn(
                         tma_atom_K, 0, cute.make_layout(1), gK, sK
                     )
@@ -725,7 +730,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                     )
                     tma_load_V_fn = copy_utils.tma_producer_copy_fn(tma_load_V_fn, pipeline_v)
                 else:
-                    # === cp_async path (paged KV with page_size != n_block_size) ===
+                    # === cp_async 路径（page_size != n_block_size 的分页 KV）===
                     paged_kv_manager = PagedKVManager.create(
                         mPageTable,
                         mK,
@@ -735,7 +740,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         head_idx_kv,
                         tidx,
                         seqlen.seqlen_k,
-                        0,  # leftpad_k
+                        0,  # leftpad_k（左侧填充）
                         self.tile_n,
                         self.tile_hdim,
                         self.tile_hdimv,
@@ -771,10 +776,10 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                     n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
                     # if cute.arch.thread_idx()[0] == 0:
                     #     cute.printf("m_block = %d, n_block_min: %d, n_block_max: %d", m_block, n_block_min, n_block_max)
-                    # Clamp n_block to 0 when n_block_max == 0 (can happen with causal
-                    # + pack_gqa when seqlen_k < tile_n). TMA handles n_block=-1
-                    # gracefully (fills zeros), but cp.async would crash on
-                    # out-of-bounds page table access.
+                    # 当 n_block_max == 0 时把 n_block 夹紧到 0（causal + pack_gqa
+                    # 且 seqlen_k < tile_n 时可能发生）。TMA 能优雅处理 n_block = -1
+                    #（自动补零），但 cp.async 会因越界的
+                    # page table 访问而崩溃。
                     n_block = (
                         n_block_max - 1
                         if const_expr(self.use_tma_KV)
@@ -786,7 +791,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         else None
                     )
 
-                    # First iteration: load K on pipeline_k, Q on pipeline_q
+                    # 第一次迭代：在 pipeline_k 上加载 K，在 pipeline_q 上加载 Q
+                    # 讲解：producer 从最后一个 K/V 块（n_block_max-1）开始倒序预取，先发 K、再发 V，
+                    # 与 consumer 的消费顺序对齐；Q 走独立的 1 级流水线，只加载一次。
                     if is_kv_load_warp:
                         pipeline_k.producer_acquire(kv_producer_state)
                         if const_expr(not self.use_tma_KV):
@@ -875,8 +882,8 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                             )
                             kv_producer_state.advance()
                 else:
-                    # Block sparsity: use TMA closures directly (not paged)
-                    # Load Q on pipeline_q, separate from K/V pipeline
+                    # 块稀疏（block sparsity）：直接使用 TMA 闭包（closure），不走分页
+                    # 在 pipeline_q 上加载 Q，与 K/V 流水线分开
                     if const_expr(self.use_tma_Q):
                         if warp_idx_in_wg == 0:
                             pipeline_q.producer_acquire_w_index_phase(0, q_producer_phase)
@@ -910,11 +917,10 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                 tile_scheduler.prefetch_next_work()
                 tile_scheduler.advance_to_next_work()
                 work_tile = tile_scheduler.get_current_work()
-                # End of persistent scheduler loop
+                # persistent scheduler 循环结束
 
-            # Producer tail is only useful for cluster to avoid early exit of blocks.
-            # We only need producer_tail on V since that's the last that's loaded, we don't
-            # need it for Q (no cluster) and K.
+            # producer_tail 只在 cluster 场景下有用，用于避免某些块提前退出。
+            # 只需要对 V 做 producer_tail（V 是最后加载的），Q（无 cluster）和 K 都不需要。
             if is_kv_load_warp:
                 pipeline_v.producer_tail(kv_producer_state)
 
@@ -987,7 +993,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         mma_pv_fn = partial(sm90_utils.gemm_w_idx, tiled_mma_pv, acc_O, tOrP, tOrVt)
 
         # ///////////////////////////////////////////////////////////////////////////////
-        # Smem copy atom tiling
+        # smem 拷贝原子（copy atom）的分块（tiling）
         # ///////////////////////////////////////////////////////////////////////////////
         smem_copy_atom_P = utils.get_smem_store_atom(
             self.arch.major * 10 + self.arch.minor, self.dtype
@@ -1011,7 +1017,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             softmax_scale=softmax_scale,
         )
 
-        # For RescaleOBeforeGemm: persistent scores_scale across iterations
+        # RescaleOBeforeGemm：跨迭代持久的 scores_scale（分数缩放）
         scores_scale = None
         if const_expr(self.rescale_O_before_gemm):
             scores_scale = cute.make_rmem_tensor_like(softmax.row_max, Float32)
@@ -1051,11 +1057,11 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         while work_tile.is_valid_tile:
             # if work_tile.is_valid_tile:
 
-            # shape: (atom_v_m * rest_m)
+            # 形状：(atom_v_m * rest_m)
             m_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen = SeqlenInfoCls(batch_idx)
 
-            # Recompute fastdiv_mods if necessary for varlen with aux_tensors
+            # 若为带 aux_tensors 的变长（varlen）场景，必要时重算 fastdiv_mods
             recompute_fastdiv_mods_q = cutlass.const_expr(
                 aux_tensors is not None and (seqlen.has_cu_seqlens_q or seqlen.has_seqused_q)
             )
@@ -1102,21 +1108,24 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             )
             n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
             pipeline_q.consumer_wait_w_index_phase(0, q_consumer_phase)
-            # For performance reason, we separate out two kinds of iterations:
-            # those that need masking on S, and those that don't.
-            # We need masking on S for the very last block when K and V has length not multiple of tile_n.
-            # We also need masking on S if it's causal, for the last several blocks.
-            # softmax.reset()  # Don't need reset as we explicitly call softmax w is_first=True
+            # 出于性能考虑，把迭代分成两类：需要对 S 做掩码（masking）的迭代，和不需要的迭代。
+            # 当 K/V 长度不是 tile_n 的整数倍时，最后一个块需要对 S 做掩码。
+            # 若是 causal，则最后几个块也需要对 S 做掩码。
+            # softmax.reset()  # 不需要 reset，因为我们显式地以 is_first=True 调用 softmax
             O_should_accumulate = False
 
             # ==========================================
-            # MAINLOOP
+            # 主循环（MAINLOOP）
+            # 讲解：主循环处理当前 M 块对应的全部 K/V 块，是 flash attention 的核心流程：
+            # ① 等待 Q 块就绪；② 依次处理每个 K/V 块（QK^T GEMM -> mask/score_mod ->
+            # online softmax 更新 row_max/row_sum -> 缩放已累积的 acc_O -> PV GEMM 累加）；
+            # ③ 循环结束后在 epilogue 归一化并写出 O 与 LSE。
             # ==========================================
             if const_expr(not self.use_block_sparsity):
                 # ==========================================
-                # No block-sparsity (original path)
+                # 无块稀疏（原始路径）
                 # ==========================================
-                # First iteration with seqlen masking
+                # 第一次迭代，带 seqlen 掩码
                 if const_expr(self.intra_wg_overlap):
                     kv_consumer_state = process_first_half_block(
                         n_block=n_block_max - 1,
@@ -1139,7 +1148,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                     O_should_accumulate = True
                 # if cute.arch.thread_idx()[0] == 128: cute.printf("m_block = {}, n_block_max = {}, n_block_min = {}", m_block, n_block_max, n_block_min)
                 n_block_max -= 1
-                # Next couple of iterations with causal masking
+                # 接下来若干次迭代，带 causal 掩码
                 if const_expr(self.is_causal or self.is_local):
                     n_block_min_causal_local_mask = block_info.get_n_block_min_causal_local_mask(
                         seqlen, m_block, n_block_min
@@ -1157,7 +1166,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         )
                         O_should_accumulate = True
                     n_block_max = cutlass.min(n_block_max, n_block_min_causal_local_mask)
-                # The remaining iterations have no masking
+                # 其余迭代不需要掩码
                 n_block_min_before_local_mask = block_info.get_n_block_min_before_local_mask(
                     seqlen, m_block, n_block_min
                 )
@@ -1171,7 +1180,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=False),
                     )
                     O_should_accumulate = True
-                # Separate iterations with local masking on the left
+                # 单独处理左侧 local（滑动窗口）掩码的迭代
                 if const_expr(self.is_local and block_info.window_size_left is not None):
                     n_block_max = cutlass.min(n_block_max, n_block_min_before_local_mask)
                     for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
@@ -1183,9 +1192,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                             mask_fn=partial(mask_fn, mask_mod=self.mask_mod, mask_seqlen=False),
                         )
                         O_should_accumulate = True
-                # Release Q pipeline so the producer can load the next tile's Q
+                # 释放 Q 流水线，让 producer 能加载下一个 tile 的 Q
                 pipeline_q.consumer_release_w_index(0)
-                # Last "half" iteration
+                # 最后"半次"迭代
                 if const_expr(self.intra_wg_overlap):
                     kv_consumer_state = process_last_half_block(
                         kv_consumer_state=kv_consumer_state,
@@ -1197,7 +1206,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
 
             else:
                 # ==========================================
-                # Block sparsity
+                # 块稀疏（block sparsity）
                 # ==========================================
                 kv_consumer_state, O_should_accumulate, processed_any = consume_block_sparse_loads(
                     blocksparse_tensors,
@@ -1222,10 +1231,10 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                     self.q_subtile_factor,
                 )
 
-                # Release Q pipeline so the producer can load the next tile's Q
+                # 释放 Q 流水线，让 producer 能加载下一个 tile 的 Q
                 pipeline_q.consumer_release_w_index(0)
 
-                # Handle empty case (when no blocks to process)
+                # 处理空情况（没有需要处理的块）
                 if not processed_any:
                     softmax.reset()
                     acc_O.fill(0.0)
@@ -1245,12 +1254,14 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
                         q_head_idx = row % self.qhead_per_kvhead + head_idx * self.qhead_per_kvhead
                         sink_val[r] = Float32(learnable_sink[q_head_idx])
 
-            # normalize acc_O by row_sum and calculate the lse
+            # 用 row_sum 归一化 acc_O，并计算 LSE（行 softmax 分母的对数）
             row_scale = softmax.finalize(sink_val=sink_val)
             softmax.rescale_O(acc_O, row_scale)
 
             # ///////////////////////////////////////////////////////////////////////////////
-            # Epilogue
+            # 尾声（epilogue）
+            # 讲解：epilogue 把归一化后的 acc_O 写回 gmem 的 O，同时把 row_sum 以对数形式（LSE）
+            # 写出，供 SplitKV 合并或反向传播使用。
             # ///////////////////////////////////////////////////////////////////////////////
             self.epilogue(
                 acc_O,
@@ -1288,19 +1299,19 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         score_mod_fn: Optional[Callable] = None,
         is_first_block: bool = False,
     ):
-        """Processes the first half block when using intra-warpgroup-overlap"""
+        """使用 intra-warpgroup-overlap 时处理"前半块"（QK GEMM + softmax 部分）。"""
 
         pipeline_k.consumer_wait(kv_consumer_state, pipeline_k.consumer_try_wait(kv_consumer_state))
         acc_S = mma_qk_fn(B_idx=kv_consumer_state.index, wg_wait=0)
         pipeline_k.consumer_release(kv_consumer_state)
 
-        # Apply score modification if present
+        # 若存在 score_mod，则应用分数修改
         if const_expr(score_mod_fn is not None):
             score_mod_fn(acc_S, n_block=n_block, seqlen=seqlen)
 
-        # Apply mask; mask_seqlen always True for first block
-        # Caveat: if full block further right than mask block, seqlen masking is redundant;
-        # however, masking is being applied anyway, so essentially no perf hit
+        # 应用掩码；第一个块时 mask_seqlen 恒为 True
+        # 注意：若完整块比掩码块更靠右，seqlen 掩码是冗余的；
+        # 不过反正都会应用掩码，因此基本没有性能损失
         mask_fn(acc_S, n_block=n_block, mask_seqlen=True)
 
         row_scale = softmax.online_softmax(acc_S, is_first=is_first_block)
@@ -1316,11 +1327,11 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         if const_expr(not self.mma_pv_is_rs):
             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
             cute.copy(smem_copy_params.smem_thr_copy_P, tPrP, smem_copy_params.tPsP)
-            # Fence and barrier to make smem store visible to WGMMA
+            # fence + barrier，使 smem 写入对 WGMMA 可见
             cute.arch.fence_view_async_shared()
             cute.arch.sync_warp()
 
-        # For RescaleOBeforeGemm: initialize acc_O
+        # RescaleOBeforeGemm：初始化 acc_O
         if const_expr(self.rescale_O_before_gemm):
             acc_O.fill(0.0)
             scores_scale.store(row_scale.load())
@@ -1338,9 +1349,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         softmax: Optional[Softmax] = None,
         acc_O: Optional[cute.Tensor] = None,
     ):
-        """Processes the final PV GEMM when using intra-warpgroup-overlap"""
+        """使用 intra-warpgroup-overlap 时处理"后半块"（最后的 PV GEMM）部分。"""
 
-        # For RescaleOBeforeGemm: rescale O before the final PV GEMM
+        # RescaleOBeforeGemm：在最后一步 PV GEMM 之前先缩放 O
         if const_expr(self.rescale_O_before_gemm):
             softmax.rescale_O(acc_O, scores_scale)
 
@@ -1364,20 +1375,22 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         smem_copy_params: SimpleNamespace,
         softmax: Softmax,
         seqlen: SeqlenInfoQK,
-        scores_scale: Optional[cute.Tensor] = None,  # not used
+        scores_scale: Optional[cute.Tensor] = None,  # 未使用
         score_mod_fn: Optional[Callable] = None,
         mask_fn: Optional[Callable] = None,
         is_first_n_block: cutlass.Constexpr = False,
         check_inf: cutlass.Constexpr = True,
     ):
         pipeline_k.consumer_wait(smem_pipe_read, pipeline_k.consumer_try_wait(smem_pipe_read))
-        # S = Q @ K.T
+        # S = Q @ K.T（计算注意力分数矩阵）
+        # 讲解：每个 K/V 块的处理四步：① QK^T GEMM 得分数 acc_S；② online softmax 更新
+        # row_max/row_sum 并返回行缩放系数；③ 用旧系数缩放已累积的 acc_O；④ PV GEMM 累加 P@V。
         acc_S = mma_qk_fn(B_idx=smem_pipe_read.index, wg_wait=-1)
         self.warp_scheduler_barrier_arrive()
         warpgroup.wait_group(0)
         pipeline_k.consumer_release(smem_pipe_read)
 
-        # handle score mods and masking
+        # 处理 score_mod 与掩码
         if const_expr(score_mod_fn is not None):
             score_mod_fn(acc_S, n_block=n_block, seqlen=seqlen)
         if const_expr(mask_fn is not None):
@@ -1392,21 +1405,20 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             else cute.make_rmem_tensor_like(tOrP_acc, self.dtype)
         )
         # tOrP.store(tOrP_acc.load().to(self.dtype))
-        # the "to(self.dtype)" conversion fails to vectorize for block sizes other
-        # than 128 x 128, i.e. it calls convert on 1 fp32 element at a time instead of
-        # 2 elements. So we just call ptx directly.
+        # 对于非 128 x 128 的块大小，"to(self.dtype)" 转换无法向量化：
+        # 它会一次只转换 1 个 fp32 元素，而不是一次 2 个元素。因此这里直接调用 ptx。
         utils.cvt_f16(tOrP_acc, tOrP_cur)
         if const_expr(not self.mma_pv_is_rs):
             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
             cute.copy(smem_copy_params.smem_thr_copy_P, tPrP, smem_copy_params.tPsP)
         softmax.rescale_O(acc_O, row_scale)
         if const_expr(not self.mma_pv_is_rs):
-            # Fence and barrier to make sure smem store is visible to WGMMA
+            # fence + barrier，确保 smem 写入对 WGMMA 可见
             cute.arch.fence_view_async_shared()
-            cute.arch.sync_warp()  # Only need syncwarp since each warp is using its own P values for MmaPV
+            cute.arch.sync_warp()  # 只需 syncwarp，因为每个 warp 用自己的 P 值做 MmaPV
         pipeline_v.consumer_wait(smem_pipe_read, pipeline_v.consumer_try_wait(smem_pipe_read))
         self.warp_scheduler_barrier_sync()
-        # O += P @ V
+        # O += P @ V（累加注意力输出）
         mma_pv_fn(B_idx=smem_pipe_read.index, wg_wait=0)
         pipeline_v.consumer_release(smem_pipe_read)
         smem_pipe_read.advance()
@@ -1435,19 +1447,22 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         smem_pipe_read.advance()
         pipeline_k.consumer_wait(smem_pipe_read, pipeline_k.consumer_try_wait(smem_pipe_read))
         self.warp_scheduler_barrier_sync()
-        # S = Q @ K.T
+        # 讲解：intra-warpgroup overlap 让 QK^T 与 PV 两个 GEMM 在 warpgroup 内重叠执行：
+        # 先发出上一块的 PV GEMM，再计算当前块的 QK^T，最后用 wait_group 回收结果，
+        # 从而提高 warp 利用率、隐藏 GEMM 与访存延迟。
+        # S = Q @ K.T（计算注意力分数矩阵）
         acc_S = mma_qk_fn(B_idx=smem_pipe_read.index, wg_wait=-1)
-        # RescaleOBeforeGemm: rescale O while QK GEMM is in flight, before PV GEMM
+        # RescaleOBeforeGemm：在 QK GEMM 进行期间、PV GEMM 之前缩放 O
         if const_expr(self.rescale_O_before_gemm):
             softmax.rescale_O(acc_O, scores_scale)
         pipeline_v.consumer_wait(smem_pipe_read_v, pipeline_v.consumer_try_wait(smem_pipe_read_v))
-        # O += P @ V
+        # O += P @ V（累加注意力输出）
         mma_pv_fn(B_idx=smem_pipe_read_v.index, wg_wait=-1)
         self.warp_scheduler_barrier_arrive()
         warpgroup.wait_group(1)
         pipeline_k.consumer_release(smem_pipe_read)
 
-        # handle score mods and masking
+        # 处理 score_mod 与掩码
         if const_expr(score_mod_fn is not None):
             score_mod_fn(acc_S, n_block=n_block, seqlen=seqlen)
         if const_expr(mask_fn is not None):
@@ -1464,9 +1479,8 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
             else cute.make_rmem_tensor_like(tOrP_acc, self.dtype)
         )
         # tOrP_cur.store(tOrP_acc.load().to(self.dtype))
-        # the "to(self.dtype)" conversion fails to vectorize for block sizes other
-        # than 128 x 128, i.e. it calls convert on 1 fp32 element at a time instead of
-        # 2 elements. So we just call ptx directly.
+        # 对于非 128 x 128 的块大小，"to(self.dtype)" 转换无法向量化：
+        # 它会一次只转换 1 个 fp32 元素，而不是一次 2 个元素。因此这里直接调用 ptx。
         utils.cvt_f16(tOrP_acc, tOrP_cur)
         if const_expr(not self.mma_pv_is_rs):
             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
@@ -1476,9 +1490,9 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         if const_expr(self.rescale_O_before_gemm):
             scores_scale.store(row_scale.load())
         if const_expr(not self.mma_pv_is_rs):
-            # Fence and barrier to make sure smem store is visible to WGMMA
+            # fence + barrier，确保 smem 写入对 WGMMA 可见
             cute.arch.fence_view_async_shared()
-            cute.arch.sync_warp()  # Only need syncwarp since each warp is using its own P values for MmaPV
+            cute.arch.sync_warp()  # 只需 syncwarp，因为每个 warp 用自己的 P 值做 MmaPV
         return smem_pipe_read
 
     @cute.jit
@@ -1505,7 +1519,7 @@ class FlashAttentionForwardSm90(FlashAttentionForwardBase):
         aux_data: AuxData = AuxData(),
         fastdiv_mods=None,
     ):
-        # Prepare index tensor
+        # 准备索引张量
         cS = cute.make_identity_tensor((self.tile_m, self.tile_n))
         cS = cute.domain_offset((m_block * self.tile_m, n_block * self.tile_n), cS)
         tScS = thr_mma_qk.partition_C(cS)

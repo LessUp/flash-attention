@@ -28,7 +28,7 @@ def call_score_mod(
     aux_data: AuxData,
 ):
     aux_tensors = aux_data.tensors if aux_data.tensors is not None else ()
-    # Compatibility shim for pre-aux_scalars score_mod callables.
+    # 兼容层：为引入 aux_scalars 之前的旧版 score_mod 可调用对象提供兼容。
     if cutlass.const_expr(aux_data.scalars is not None):
         return score_mod(
             score,
@@ -64,7 +64,7 @@ def call_score_mod_bwd(
     aux_data: AuxData,
 ):
     aux_tensors = aux_data.tensors if aux_data.tensors is not None else ()
-    # Compatibility shim for pre-aux_scalars score_mod_bwd callables.
+    # 兼容层：为引入 aux_scalars 之前的旧版 score_mod_bwd 可调用对象提供兼容。
     if cutlass.const_expr(aux_data.scalars is not None):
         return score_mod_bwd(
             grad,
@@ -130,14 +130,14 @@ class Softmax(ParamsBase):
         is_first: cutlass.Constexpr[bool] = False,
         check_inf: cutlass.Constexpr[bool] = True,
     ) -> cute.Tensor:
-        """Apply online softmax and return the row_scale to rescale O.
+        """应用在线 softmax，并返回用于重缩放 O 的行缩放因子（row_scale）。
 
-        :param acc_S: acc_S tensor
+        :param acc_S: 累加器 S 张量（QK^T 分数累加结果）
         :type acc_S: cute.Tensor
-        :param is_first: is first n_block
+        :param is_first: 是否为第一个 n_block（N 方向块）
         :type is_first: cutlass.Constexpr
         """
-        # Change acc_S to M,N layout view.
+        # 将 acc_S 重排为 M,N 布局视图。
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
         row_scale = cute.make_fragment_like(self.row_max, Float32)
 
@@ -146,7 +146,7 @@ class Softmax(ParamsBase):
         scale_log2 = self.scale_log2
         arch = self.arch
 
-        # Each iteration processes one row of acc_S
+        # 每次迭代处理 acc_S 的一行（该行对应一个 query 位置的所有 KV 块分数）
         for r in cutlass.range(cute.size(row_max), unroll_full=True):
             acc_S_row = acc_S_mn[r, None].load()  # (n_block_size)
 
@@ -157,7 +157,7 @@ class Softmax(ParamsBase):
             )
 
             row_max_cur = cute.arch.warp_reduction_max(row_max_cur, threads_in_group=4)
-            # Update row_max before changing row_max_cur to safe value for -inf
+            # 先更新 row_max，再把 row_max_cur 改成对 -inf 安全的取值
             row_max_prev = row_max[r]
             row_max[r] = row_max_cur
 
@@ -177,6 +177,9 @@ class Softmax(ParamsBase):
                     acc_S_row * scale_log2 - row_max_cur_scaled, fastmath=True
                 )
                 # row_scale[r] = cute.math.exp2(row_max_prev * self.scale_log2 - row_max_cur_scaled)
+                # 讲解：在线 softmax 的重缩放步骤。新块带来更大的 row_max 时，旧的
+                # O 与 row_sum 必须按 exp2((row_max_prev - row_max_cur) * scale_log2)
+                # 缩小，才能与新的 exp2(score - row_max_cur) 累加结果数值一致。
                 row_scale[r] = cute.math.exp2(
                     (row_max_prev - row_max_cur) * scale_log2, fastmath=True
                 )
@@ -193,14 +196,14 @@ class Softmax(ParamsBase):
     def finalize(
         self, final_scale: Float32 = 1.0, sink_val: Float32 | cute.Tensor | None = None
     ) -> cute.Tensor:
-        """Finalize the online softmax by computing the scale and logsumexp."""
+        """收尾在线 softmax：计算归一化缩放因子与 logsumexp。"""
         if cutlass.const_expr(sink_val is not None and isinstance(sink_val, cute.Tensor)):
             assert cute.size(sink_val) == cute.size(self.row_sum)
         row_sum = self.row_sum
         row_max = self.row_max
         scale_log2 = self.scale_log2
 
-        # quad reduction for row_sum as we didn't do it during each iteration of online softmax
+        # 对 row_sum 做四元（quad）归约：在线 softmax 每轮迭代时未做这一步
         row_sum.store(utils.warp_reduce(row_sum.load(), operator.add, width=4))
         row_scale = cute.make_fragment_like(row_max, Float32)
 
@@ -213,7 +216,7 @@ class Softmax(ParamsBase):
                     row_max_scaled = sink_val_cur * LOG2_E
                 row_sum[r] += cute.math.exp2(sink_val_cur * LOG2_E - row_max_scaled, fastmath=True)
 
-            # if row_sum is zero or nan, set acc_O_mn_row to 1.0
+            # 若 row_sum 为 0 或 NaN，则把缩放因子设为 1.0（避免除零/NaN 扩散）
             acc_O_mn_row_is_zero_or_nan = row_sum[r] == 0.0 or row_sum[r] != row_sum[r]
             row_scale[r] = (
                 cute.arch.rcp_approx(row_sum[r] if not acc_O_mn_row_is_zero_or_nan else 1.0)
@@ -229,10 +232,10 @@ class Softmax(ParamsBase):
 
     @cute.jit
     def rescale_O(self, acc_O: cute.Tensor, row_scale: cute.Tensor) -> None:
-        """Scale each row of acc_O by the given scale tensor.
-        :param acc_O: input tensor
+        """按给定的行缩放张量逐行缩放 acc_O。
+        :param acc_O: 输入张量（O 累加器）
         :type acc_O: cute.Tensor
-        :param row_scale: row_scale tensor
+        :param row_scale: 行缩放张量
         :type row_scale: cute.Tensor
         """
         acc_O_mn = layout_utils.reshape_acc_to_mn(acc_O)
@@ -303,8 +306,8 @@ class SoftmaxSm100(Softmax):
     def update_row_max_precomputed(
         self, hw_row_max: Float32, is_first: int
     ) -> Tuple[Float32, Float32]:
-        """Row max already reduced in hardware (SM103 tcgen05.ld.red): skip the
-        software fmax tree — the TMEM controller computed the max during the S load."""
+        """行最大值已在硬件中完成归约（SM103 tcgen05.ld.red）：跳过
+        软件 fmax 树 —— TMEM 控制器在 S 加载期间就已计算出最大值。"""
         if cutlass.const_expr(is_first):
             row_max_new = hw_row_max
         else:
@@ -457,7 +460,7 @@ def floor_if_packed(
     q_idx,
     qhead_per_kvhead: cutlass.Constexpr[int],
 ) -> cute.Tensor:
-    """Convert q_idx to packed format for Pack-GQA."""
+    """把 q_idx 转换为 Pack-GQA 的 packed 格式（即逻辑 query head 索引）。"""
     if cutlass.const_expr(qhead_per_kvhead == 1):
         return q_idx
     return q_idx // qhead_per_kvhead
@@ -480,28 +483,29 @@ def apply_score_mod_inner(
     qhead_per_kvhead: cutlass.Constexpr[int] = 1,
     transpose_indices: cutlass.Constexpr[bool] = False,
 ):
-    """Shared implementation for applying score modification.
+    """应用分数修改（score_mod）的共享实现。
 
     Args:
-        score_tensor: The scores to modify (acc_S for flash_fwd, tSrS_t2r for sm100)
-        index_tensor: Index positions (tScS for flash_fwd, tScS_t2r for sm100)
-        score_mod: The score modification function to apply
-        batch_idx: Batch index
-        head_idx: Head index
-        softmax_scale: Scale to apply
-        vec_size: Vector size for processing elements
-        qk_acc_dtype: Data type for accumulator
-        aux_tensors: Optional aux_tensors for FlexAttention
-        aux_scalars: Optional runtime scalar captures for FlexAttention
-        fastdiv_mods: Tuple of (seqlen_q_divmod, seqlen_k_divmod) for wrapping
-        seqlen_info: Sequence length info
-        constant_q_idx: If provided, use this constant for all q_idx values
-                        If None, compute q_idx per-element
-        qhead_per_kvhead_packgqa: Pack-GQA replication factor. Divide q_idx by this
-                                  when greater than 1 so score mods see logical heads.
-        transpose_indices: If True, swap q_idx/kv_idx in index_tensor (for bwd kernel where S is transposed)
+        score_tensor: 待修改的分数（flash_fwd 中为 acc_S，sm100 中为 tSrS_t2r）
+        index_tensor: 索引位置（flash_fwd 中为 tScS，sm100 中为 tScS_t2r）
+        score_mod: 要应用的分数修改函数
+        batch_idx: batch 索引
+        head_idx: head 索引
+        softmax_scale: 要应用的缩放因子
+        vec_size: 处理元素的向量宽度
+        qk_acc_dtype: 累加器数据类型
+        aux_tensors: FlexAttention 的可选 aux_tensors
+        aux_scalars: FlexAttention 的可选运行时标量捕获
+        fastdiv_mods: (seqlen_q_divmod, seqlen_k_divmod) 元组，用于环绕取模
+        seqlen_info: 序列长度信息
+        constant_q_idx: 若提供，则对所有 q_idx 值使用该常量；
+                        若为 None 则逐元素计算 q_idx
+        qhead_per_kvhead_packgqa: Pack-GQA 的复制因子。大于 1 时用其除 q_idx，
+                                  使 score mod 看到逻辑 head。
+        transpose_indices: 若为 True，交换 index_tensor 中的 q_idx/kv_idx
+                          （用于 S 被转置的 bwd kernel）
     """
-    # Index positions in the index_tensor tuple
+    # index_tensor 元组中的索引位置
     # Forward: index_tensor[...][0] = q_idx, index_tensor[...][1] = kv_idx
     # Backward (transposed): index_tensor[...][0] = kv_idx, index_tensor[...][1] = q_idx
     if cutlass.const_expr(transpose_indices):
@@ -515,14 +519,14 @@ def apply_score_mod_inner(
     score_vec = cute.make_rmem_tensor(vec_size, qk_acc_dtype)
     kv_idx_vec = cute.make_rmem_tensor(vec_size, cutlass.Int32)
 
-    # SSA values for batch (constant across all elements)
+    # batch 的 SSA 值（对所有元素恒定）
     batch_idx_ssa = utils.scalar_to_ssa(batch_idx, cutlass.Int32).broadcast_to((vec_size,))
 
-    # Handle q_idx based on whether it's constant
+    # 根据 q_idx 是否为常量来处理它
     q_idx_vec = cute.make_rmem_tensor(vec_size, cutlass.Int32)
 
-    # For Pack-GQA with non-constant q_idx, we need per-element head indices
-    # since a thread may process multiple query head indices
+    # 对于 q_idx 非常量的 Pack-GQA，需要逐元素的 head 索引，
+    # 因为一个线程可能处理多个 query head 的索引
     if cutlass.const_expr(qhead_per_kvhead > 1 and constant_q_idx is None):
         head_idx_vec = cute.make_rmem_tensor(vec_size, cutlass.Int32)
 
@@ -530,15 +534,15 @@ def apply_score_mod_inner(
         for j in cutlass.range(vec_size, unroll_full=True):
             score_vec[j] = score_tensor[i + j] * softmax_scale
 
-            # Extract head offset from packed q_idx for Pack-GQA
+            # 从 packed q_idx 中提取 head 偏移量（用于 Pack-GQA）
             if cutlass.const_expr(qhead_per_kvhead > 1 and constant_q_idx is None):
                 q_idx_packed = index_tensor[i + j][q_idx_pos]
-                # Building up the logical q_head idx: final_q_head = kv_head * qhead_per_kvhead + (q_physical % qhead_per_kvhead)
+                # 构造逻辑 q_head 索引：final_q_head = kv_head * qhead_per_kvhead + (q_physical % qhead_per_kvhead)
                 q_idx_logical = q_idx_packed // qhead_per_kvhead
                 head_offset = q_idx_packed - q_idx_logical * qhead_per_kvhead
                 head_idx_vec[j] = head_idx * qhead_per_kvhead + head_offset
 
-            # If we will do loads we mod, in order to not read OOB
+            # 若要执行加载，就做取模运算，避免越界读取（OOB）
             if cutlass.const_expr(aux_data.tensors is not None and fastdiv_mods is not None):
                 if cutlass.const_expr(constant_q_idx is None):
                     seqlen_q_divmod, seqlen_k_divmod = fastdiv_mods
@@ -553,22 +557,22 @@ def apply_score_mod_inner(
                 _, kv_idx_wrapped = divmod(index_tensor[i + j][kv_idx_pos], seqlen_k_divmod)
                 kv_idx_vec[j] = kv_idx_wrapped
             else:
-                # No bounds checking - direct indexing
+                # 不做越界检查 —— 直接索引
                 if constant_q_idx is None:
                     q_idx_vec[j] = floor_if_packed(index_tensor[i + j][q_idx_pos], qhead_per_kvhead)
                 kv_idx_vec[j] = index_tensor[i + j][kv_idx_pos]
 
-        # Convert to SSA for score_mod call
+        # 转换为 SSA 形式以便调用 score_mod
         score_ssa = score_vec.load()
         kv_idx_ssa = kv_idx_vec.load()
         if cutlass.const_expr(constant_q_idx is None):
             q_idx_ssa = q_idx_vec.load()
         else:
-            # NB we do not apply Pack-GQA division here, as constant_q_idx is assumed to already be logical
+            # 注意：这里不做 Pack-GQA 除法，因为假设 constant_q_idx 已经是逻辑索引
             q_idx_const = constant_q_idx
             q_idx_ssa = utils.scalar_to_ssa(q_idx_const, cutlass.Int32).broadcast_to((vec_size,))
 
-        # Compute head_idx_ssa: per-element for Pack-GQA with non-constant q_idx, constant otherwise
+        # 计算 head_idx_ssa：Pack-GQA 且 q_idx 非常量时逐元素计算，否则为常量
         if cutlass.const_expr(qhead_per_kvhead > 1 and constant_q_idx is None):
             head_idx_ssa = head_idx_vec.load()
         else:
@@ -585,7 +589,7 @@ def apply_score_mod_inner(
             aux_data,
         )
 
-        # Write back modified scores
+        # 写回修改后的分数
         score_vec.store(post_mod_scores)
         for j in cutlass.range(vec_size, unroll_full=True):
             score_tensor[i + j] = score_vec[j]
@@ -609,27 +613,27 @@ def apply_score_mod_bwd_inner(
     qhead_per_kvhead: cutlass.Constexpr[int] = 1,
     transpose_indices: cutlass.Constexpr[bool] = False,
 ):
-    """Apply backward score modification (joint graph).
+    """应用反向分数修改（联合图，joint graph）。
 
     Args:
-        grad_tensor: in/out: dlogits rewritten in-place with d(scaled_scores)
-        score_tensor: pre-mod scores (unscaled QK tile), scaled by softmax_scale internally
-        index_tensor: Index positions (same as forward)
-        score_mod_bwd: The backward score modification function (joint graph)
-        batch_idx: Batch index
-        head_idx: Head index
-        softmax_scale: Scale to apply to score_tensor
-        vec_size: Vector size for processing elements
-        qk_acc_dtype: Data type for accumulator
-        aux_tensors: Optional aux_tensors for FlexAttention
-        aux_scalars: Optional runtime scalar captures for FlexAttention
-        fastdiv_mods: Tuple of (seqlen_q_divmod, seqlen_k_divmod) for wrapping
-        seqlen_info: Sequence length info
-        constant_q_idx: If provided, use this constant for all q_idx values
-        qhead_per_kvhead: Pack-GQA replication factor
-        transpose_indices: If True, swap q_idx/kv_idx in index_tensor
+        grad_tensor: 输入/输出：dlogits 原地改写为 d(scaled_scores)
+        score_tensor: 修改前的分数（未缩放的 QK 块），内部会按 softmax_scale 缩放
+        index_tensor: 索引位置（与 forward 相同）
+        score_mod_bwd: 反向分数修改函数（联合图）
+        batch_idx: batch 索引
+        head_idx: head 索引
+        softmax_scale: 应用到 score_tensor 的缩放因子
+        vec_size: 处理元素的向量宽度
+        qk_acc_dtype: 累加器数据类型
+        aux_tensors: FlexAttention 的可选 aux_tensors
+        aux_scalars: FlexAttention 的可选运行时标量捕获
+        fastdiv_mods: (seqlen_q_divmod, seqlen_k_divmod) 元组，用于环绕取模
+        seqlen_info: 序列长度信息
+        constant_q_idx: 若提供，则对所有 q_idx 值使用该常量
+        qhead_per_kvhead: Pack-GQA 的复制因子
+        transpose_indices: 若为 True，交换 index_tensor 中的 q_idx/kv_idx
     """
-    # Index positions in the index_tensor tuple
+    # index_tensor 元组中的索引位置
     # Forward: index_tensor[...][0] = q_idx, index_tensor[...][1] = kv_idx
     # Backward (transposed): index_tensor[...][0] = kv_idx, index_tensor[...][1] = q_idx
     if cutlass.const_expr(transpose_indices):
@@ -645,14 +649,14 @@ def apply_score_mod_bwd_inner(
     batch_idx_ssa = utils.scalar_to_ssa(batch_idx, cutlass.Int32).broadcast_to((vec_size,))
     q_idx_vec = cute.make_rmem_tensor(vec_size, cutlass.Int32)
 
-    # For Pack-GQA with non-constant q_idx, we need per-element head indices
+    # 对于 q_idx 非常量的 Pack-GQA，需要逐元素的 head 索引
     if cutlass.const_expr(qhead_per_kvhead > 1 and constant_q_idx is None):
         head_idx_vec = cute.make_rmem_tensor(vec_size, cutlass.Int32)
 
     for i in cutlass.range(0, n_vals, vec_size, unroll_full=True):
         for j in cutlass.range(vec_size, unroll_full=True):
             grad_vec[j] = grad_tensor[i + j]
-            # Scale score so joint graph sees same value as forward score_mod
+            # 缩放分数，使联合图看到与前向 score_mod 相同的值
             score_vec[j] = score_tensor[i + j] * softmax_scale
 
             if cutlass.const_expr(qhead_per_kvhead > 1 and constant_q_idx is None):
@@ -675,7 +679,7 @@ def apply_score_mod_bwd_inner(
                 _, kv_idx_wrapped = divmod(index_tensor[i + j][kv_idx_pos], seqlen_k_divmod)
                 kv_idx_vec[j] = kv_idx_wrapped
             else:
-                # No bounds checking - direct indexing
+                # 不做越界检查 —— 直接索引
                 if constant_q_idx is None:
                     q_idx_vec[j] = floor_if_packed(index_tensor[i + j][q_idx_pos], qhead_per_kvhead)
                 kv_idx_vec[j] = index_tensor[i + j][kv_idx_pos]

@@ -1,5 +1,5 @@
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
-# [2025-07-04] Version in Cute-DSL, for Hopper and Blackwell. You'll need install nvidia-cutlass-dsl==4.2.0.
+# [2025-07-04] Cute-DSL 版本，面向 Hopper 和 Blackwell。需要安装 nvidia-cutlass-dsl==4.2.0。
 
 import os
 import math
@@ -22,7 +22,7 @@ from flash_attn.cute.testing import is_fake_mode
 if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
     from flash_attn.cute import cute_dsl_ptxas  # noqa: F401
 
-    # Patch to dump ptx and then use system ptxas to compile to cubin
+    # 打补丁：导出 PTX，然后用系统 ptxas 编译成 cubin
     cute_dsl_ptxas.patch()
 
 
@@ -58,7 +58,7 @@ from flash_attn.cute.flash_bwd_mla_sm100 import FlashAttentionSparseMLABackwardS
 from flash_attn.cute.flash_bwd_mla_dq_dqv_sm100 import dQdQvGemmKernel
 from flash_attn.cute.flash_bwd_mla_dk_sm100 import dKGemmKernel
 
-# SM100 head_dim=256 2CTA kernel imports
+# SM100 head_dim=256 2CTA kernel 导入
 from flash_attn.cute.sm100_hd256_2cta_fmha_forward import BlackwellFusedMultiHeadAttentionForward
 from flash_attn.cute.sm100_hd256_2cta_fmha_backward import BlackwellFusedMultiHeadAttentionBackward
 
@@ -73,13 +73,13 @@ from flash_attn.cute.block_sparsity import (
     normalize_block_sparse_config_bwd,
 )
 
-BIN_BATCH_SEARCH_THRESH = 256  # above this batch size SingleTileVarlenScheduler gets a batch-lookup aid
-# Where the cu hint applies, use an O(1) flat-block -> batch lookup instead of the binary search.
+BIN_BATCH_SEARCH_THRESH = 256  # 超过此 batch 大小时，SingleTileVarlenScheduler 会启用 batch 查找辅助
+# 在 cu hint 生效的地方，用 O(1) 的 flat-block -> batch 查找代替二分查找。
 USE_BLOCKS_TO_BATCH: bool = True
 
 
 def _parse_arch_str(arch_str):
-    """Parse arch string (e.g. 'sm_80', 'sm_90a', '80', '100') to int (e.g. 80, 90, 100)."""
+    """解析架构字符串（例如 'sm_80'、'sm_90a'、'80'、'100'）为整数（例如 80、90、100）。"""
     import re
     match = re.match(r"^(?:sm_?|SM_?)?(\d+)(\d)([af]?)$", arch_str)
     if not match:
@@ -90,16 +90,15 @@ def _parse_arch_str(arch_str):
 
 @lru_cache(maxsize=None)
 def _get_device_arch():
-    """Cached device arch check.
+    """带缓存的设备架构检查。
 
-    Override with FLASH_ATTENTION_ARCH (e.g. 'sm_80' or '80') to select which
-    kernel path to use (SM80/SM90/SM100/SM120) independently of the compilation
-    target (CUTE_DSL_ARCH).
+    可通过 FLASH_ATTENTION_ARCH（例如 'sm_80' 或 '80'）覆盖默认值，从而独立于
+    编译目标（CUTE_DSL_ARCH）选择要走哪条 kernel 路径（SM80/SM90/SM100/SM120）。
 
-    For CPU-only compilation (no GPU), set:
-      FLASH_ATTENTION_ARCH=sm_80  (kernel selection)
-      CUTE_DSL_ARCH=sm_80         (compilation target)
-      FLASH_ATTENTION_NUM_SMS=132 (target-SKU selector metadata)
+    仅在 CPU 上编译（没有 GPU）时，请设置：
+      FLASH_ATTENTION_ARCH=sm_80  （kernel 选择）
+      CUTE_DSL_ARCH=sm_80         （编译目标）
+      FLASH_ATTENTION_NUM_SMS=132 （目标 SKU 选择器元数据）
     """
     arch_override = os.environ.get("FLASH_ATTENTION_ARCH", None)
     if arch_override is not None:
@@ -110,7 +109,7 @@ def _get_device_arch():
 
 @lru_cache(maxsize=None)
 def _validate_head_dims(head_dim: int, head_dim_v: int, compute_capability: int, alignment: int) -> None:
-    """Validate head dimension constraints based on compute capability."""
+    """根据计算能力（compute capability）校验 head_dim 的约束条件。"""
     is_deepseek_shape = head_dim == 192 and head_dim_v == 128
     is_deepseek_mla_absorbed_shape = (head_dim == 64 or head_dim == head_dim_v) and head_dim_v == 512
     is_dedicate_kernel_shape = head_dim == 256 and head_dim_v == 256
@@ -140,24 +139,24 @@ class FwdConfig:
 
 
 def _tile_size_fwd_sm90(head_dim, head_dim_v, is_causal, is_local, sparse_block_size_q=None):
-    """Return FwdConfig for SM90 forward.
+    """返回 SM90 前向的 FwdConfig。
 
-    Tile sizes and flags based on tile_size_fwd_sm90 in hopper/tile_size.h, adjusted
-    for the Python kernel's different register/smem tradeoffs (benchmarked on H100 SXM).
+    tile 大小与标志位参考 hopper/tile_size.h 中的 tile_size_fwd_sm90，并根据 Python
+    kernel 在寄存器/共享内存（smem）上的不同取舍做了调整（在 H100 SXM 上基准测试过）。
 
-    When sparse_block_size_q is set, tile_m must divide it. For head_dim <= 96 the
-    optimal tile_m=192 is used when compatible, otherwise we fall back to 128.
+    设置了 sparse_block_size_q 时，tile_m 必须能整除它。对于 head_dim <= 96，当兼容时
+    使用最优的 tile_m=192，否则回退到 128。
     """
     if head_dim <= 64:
-        # C++: 192×192 non-causal, 192×128 causal/local.
-        # Python: 192×128 RS+OL is consistently best across seqlens.
+        # C++：192×192 非 causal，192×128 causal/local。
+        # Python：192×128 RS+OL（寄存器共享 + 输出重叠）在各种 seqlen 下都稳定最优。
         if sparse_block_size_q is not None and sparse_block_size_q % 192 != 0:
             return FwdConfig(128, 128, True, True)
         return FwdConfig(192, 128, True, True)
     elif head_dim <= 96:
-        # C++: 192×144 noRS+OL for all cases.
-        # Python: RS is catastrophic with 192× tiles (~300 vs ~600 TFLOPS).
-        # noRS+OL is always required. Causal: 192×128 slightly better short seqlen.
+        # C++：所有情况下都用 192×144 noRS+OL。
+        # Python：RS 与 192× tile 组合是灾难性的（约 300 对 600 TFLOPS）。
+        # 始终要求 noRS+OL。causal 时短 seqlen 下 192×128 略优。
         if sparse_block_size_q is not None and sparse_block_size_q % 192 != 0:
             return FwdConfig(128, 128, False, True)
         if is_causal or is_local:
@@ -186,18 +185,18 @@ class BwdConfig:
     AtomLayoutMSdP: int
     AtomLayoutNdKV: int
     AtomLayoutMdQ: int
-    num_wg: int = 2  # MMA warp groups (total threads = (num_wg + 1) * 128)
+    num_wg: int = 2  # MMA warp group 数量（总线程数 = (num_wg + 1) * 128）
     dQ_single_wg: bool = False
 
 
 def _tile_size_bwd_sm90(head_dim, head_dim_v, causal, local, sparse_block_size_q=None):
-    """Return BwdConfig for SM90.
+    """返回 SM90 反向的 BwdConfig。
 
-    Configs based on C++ FA3 hopper/flash_bwd_launch_template.h,
-    benchmarked on H100 SXM.
+    配置参考 C++ FA3 的 hopper/flash_bwd_launch_template.h，
+    在 H100 SXM 上基准测试过。
     """
     if head_dim <= 64:
-        # C++ FA3: 128, 128, 64, ..., 2, 2, true, false, false, 2, 1, 2, 2
+        # C++ FA3：128, 128, 64, ..., 2, 2, true, false, false, 2, 1, 2, 2
         return BwdConfig(
             m_block_size=128, n_block_size=128,
             num_stages_Q=2, num_stages_dO=2, num_stages_PdS=2,
@@ -205,7 +204,7 @@ def _tile_size_bwd_sm90(head_dim, head_dim_v, causal, local, sparse_block_size_q
             AtomLayoutMSdP=1, AtomLayoutNdKV=2, AtomLayoutMdQ=2,
         )
     elif head_dim <= 96:
-        # C++ FA3: 64, 128, 96, dQ_swapAB=False
+        # C++ FA3：64, 128, 96, dQ_swapAB=False
         return BwdConfig(
             m_block_size=64, n_block_size=128,
             num_stages_Q=2, num_stages_dO=2, num_stages_PdS=2,
@@ -214,7 +213,7 @@ def _tile_size_bwd_sm90(head_dim, head_dim_v, causal, local, sparse_block_size_q
             dQ_single_wg=True,
         )
     elif head_dim <= 128:
-        # C++ FA3: causal/local: 64, 128; non-causal: 80, 128 with dQ_swapAB
+        # C++ FA3：causal/local 用 64, 128；non-causal 用 80, 128 且带 dQ_swapAB
         is_causal_or_local = causal or local
         m_block_size = 64 if is_causal_or_local else 80
         if sparse_block_size_q is not None and sparse_block_size_q % m_block_size != 0:
@@ -274,17 +273,17 @@ _LEARNABLE_SINK_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
 
 def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, max_splits):
-    # If num_n_blocks is too small, use 1 split. For example, we never split for hdim = 128 and seqlen_k = 512.
+    # 如果 num_n_blocks 太小，就只用 1 个 split。例如 hdim=128 且 seqlen_k=512 时我们从不 split。
     if num_n_blocks <= 4:
         return 1
-    # Avoid ZeroDivisionError when batch_size or seqlen_q is 0. The empty-Q
-    # early-exit in _flash_attn_fwd handles correctness for those shapes; this
-    # guard just keeps the heuristic safe if called in other contexts.
+    # 当 batch_size 或 seqlen_q 为 0 时避免 ZeroDivisionError。_flash_attn_fwd 中的
+    # 空 Q 提前退出负责处理这些形状的正确性；这里的防护只是让启发式逻辑在其它
+    # 调用场景下也保持安全。
     if total_mblocks == 0:
         return 1
 
-    # NOTE: We should revisit this heuristic after persistence is supported for split KV.
-    # Sometimes, it's ideal to over-schedule splits for better efficiency.
+    # 注意：等 split KV 支持持久化（persistence）之后，这个启发式需要重新审视。
+    # 有时为了更好的效率，多调度一些 split 反而是理想的。
     return min(num_SMs // total_mblocks, max_splits, num_n_blocks)
 
 
@@ -314,17 +313,17 @@ def _get_fwd_config(
     if seqlen_q is None:
         seqlen_q = max_seqlen_q
 
-    # Base tile sizes and flags: explicit override, else per-arch heuristic.
+    # 基础 tile 大小与标志位：优先显式覆盖，否则按架构启发式决定。
     cfg = FwdConfig(128, 128, True, True)
     if tile_mn is None:
         if arch // 10 == 12:
-            # SM120 tile sizes tuned for 99 KB SMEM capacity:
-            # D<=64:  128x128 → 48 KB (good occupancy)
-            # D>64:   128x64  → 64 KB (128x128 would use 96 KB, hurting occupancy)
+            # 针对 99 KB SMEM 容量调优的 SM120 tile 大小：
+            # D<=64：128x128 → 48 KB（占用率好）
+            # D>64： 128x64  → 64 KB（128x128 会用掉 96 KB，损害占用率）
             if head_dim > 64:
                 cfg = FwdConfig(128, 64, True, True)
         elif arch // 10 == 8:
-            cfg = FwdConfig(128, 64, True, True)  # SM80, should tune
+            cfg = FwdConfig(128, 64, True, True)  # SM80，需要调优
         elif arch // 10 == 9:
             sparse_q = get_sparse_q_block_size(block_sparse_tensors, seqlen_q)
             cfg = _tile_size_fwd_sm90(
@@ -370,8 +369,8 @@ def _get_fwd_config(
         num_SMs = get_num_sms_for_selection(device.index, arch)
         num_splits = num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, 128)
 
-    # SplitKV uses float32 partial output, which doubles the O buffer size
-    # in shared memory, causing OOM for diff-headdim (192, 128)
+    # SplitKV 使用 float32 的部分输出，会使共享内存中 O 缓冲区的体积翻倍，
+    # 对于不同 head 维（diff-headdim，192, 128）会导致 OOM
     if arch // 10 in [10, 11] and head_dim != head_dim_v and num_splits > 1:
         if num_n_blocks >= 64 and head_dim_v != 512:
             tile_n = 64
@@ -386,9 +385,9 @@ def _get_fwd_config(
 
 
 def _resolve_causal_local_window(causal, window_size_left, window_size_right, mask_mod=None):
-    """Resolve causal/local/window settings into canonical form.
+    """把 causal/local/window 设置解析为规范形式。
 
-    Returns (causal, local, window_size_left, window_size_right).
+    返回 (causal, local, window_size_left, window_size_right)。
     """
     if mask_mod is not None:
         return False, False, window_size_left, window_size_right
@@ -421,15 +420,15 @@ def _compute_tile_cumsum(
     qhead_per_kvhead: int = 1,
     pack_gqa: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """(cu_total_m_blocks, cu_total_splits_m_blocks), int32, (num_batch + 1,).
+    """返回 (cu_total_m_blocks, cu_total_splits_m_blocks)，均为 int32，形状 (num_batch + 1,)。
 
-    cu_total_splits_m_blocks is None when num_splits_dynamic is None.
+    当 num_splits_dynamic 为 None 时，cu_total_splits_m_blocks 为 None。
     """
     assert num_m_blocks is not None or cu_seqlens is not None or seqused is not None, (
         "_compute_tile_cumsum requires num_m_blocks, cu_seqlens, or seqused"
     )
     if num_m_blocks is not None:
-        # num_m_blocks is already in tile_size units; feed it through the seqused slot.
+        # num_m_blocks 已经是以 tile_size 为单位，直接放进 seqused 槽位传递。
         seqused = num_m_blocks
         tile = q_stage * cluster_shape_m
         seqlen_q_multiplier = 1
@@ -486,15 +485,15 @@ _compute_tile_cumsum.compile_cache = get_jit_cache("tile_cumsum")
 
 
 def _blocks_to_batch_size(total_q, num_batch, tile_m, qhead_per_kvhead, pack_gqa):
-    """Upper bound on number of m_blocks in a given varlen invocation"""
+    """给定 varlen 调用中 m_blocks 数量的上界"""
     seqlen_mult = qhead_per_kvhead if pack_gqa and qhead_per_kvhead > 1 else 1
     return (total_q * seqlen_mult + num_batch * (tile_m - 1)) // tile_m + 1
 
 
 def _compute_blocks_to_batch(cu_total_blocks, num_blocks, device):
-    """Inverted index of _compute_tile_cumsum: flat scheduler block -> batch, int32, (num_blocks,).
+    """_compute_tile_cumsum 的反向索引：扁平 scheduler block -> batch，int32，形状 (num_blocks,)。
 
-    Blocks past the last batch's range map to batch_size (invalid).
+    超出最后一个 batch 范围的 block 映射到 batch_size（视为无效）。
     """
     blocks_to_batch = torch.empty(num_blocks, dtype=torch.int32, device=device)
     compile_key = ()
@@ -560,19 +559,28 @@ def _flash_attn_fwd(
     seqlen_k_per_split: Optional[int] = None,
     disable_scheduler_metadata: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-    """Forward pass for FlashAttention.
+    """FlashAttention 前向计算。
+
+    这是标准（非变长）注意力前向的核心实现。它接收 Q/K/V（以及可选的 qv），
+    在 GPU 上执行精确（exact）注意力，返回输出 out 与 log-sum-exp（lse）。
 
     Args:
         ...
-        score_mod: A callable that takes the attention scores and applies a modification.
-        mask_mod: A callable that takes token position information and selectively masks
-        block_sparse_tensors: A tuple of tensors used for block sparsity.
-        return_lse: Whether to return the log softmax of the attention scores. If set to True will always calculate
-            The returned LSE supports taking gradient.
-        out: Optional pre-allocated output tensor. If None, will be allocated internally.
-        lse: Optional pre-allocated log-sum-exp tensor. If None, will be allocated when needed.
-        aux_tensors: Some score_mods will want to read from global aux_tensors. This is how we thread them through to the inner kernel.
-        aux_scalars: Runtime scalar captures used by score_mod or mask_mod.
+        score_mod: 一个可调用对象，接收注意力分数并对其施加修改（例如 softcap、
+            衰减等）。它在 kernel 编译期被哈希进 compile key。
+        mask_mod: 一个可调用对象，接收 token 位置信息并有选择地做 mask
+            （例如自定义的 causal 或局部窗口之外的屏蔽）。
+        block_sparse_tensors: 用于 block sparsity（块稀疏）的一组张量。
+            它允许跳过注意力矩阵中已知为空的块，从而在长序列上节省算力。
+        return_lse: 是否返回注意力分数的 log softmax。设为 True 时总是会计算 LSE，
+            且返回的 LSE 支持求梯度（可用于后续对 LSE 的反向传播）。
+        out: 可选，预分配的输出张量。为 None 时在内部自动分配。
+        lse: 可选，预分配的 log-sum-exp 张量。为 None 时在需要时才分配。
+        aux_tensors: 某些 score_mod 需要从全局 aux_tensors 中读取数据，
+            这是把它们透传到内部 kernel 的机制。
+        aux_scalars: 供 score_mod 或 mask_mod 使用的运行时标量捕获。
+        注：省略号 ... 表示这里只列出部分关键参数，完整参数列表见对外接口
+        flash_attn_func / flash_attn_varlen_func 的签名与 docstring。
     """
     aux_scalars = tuple(aux_scalars) if aux_scalars else None
     requires_grad = any(
@@ -704,7 +712,7 @@ def _flash_attn_fwd(
     if qv is None:
         lse_shape = (batch_size, num_head, seqlen_q) if cu_seqlens_q is None else (num_head, total_q)
     else:
-        # num_head contiguous better for MQA in MLA absorbed
+        # 对 MLA absorbed 中的 MQA 场景，让 num_head 连续更有利
         lse_shape = (batch_size, seqlen_q, num_head) if cu_seqlens_q is None else (total_q, num_head)
 
     if out is None:
@@ -772,7 +780,7 @@ def _flash_attn_fwd(
     requested_use_clc_scheduler = utils._get_use_clc_scheduler_default()
     requested_disable_2cta = utils._get_disable_2cta_default(is_fwd=True)
 
-    # SM80/SM120: uses SM80 MMA, 128 threads (4 warps)
+    # SM80/SM120：使用 SM80 MMA，128 线程（4 warps）
     if arch // 10 in [8, 12]:
         num_threads = 128
 
@@ -835,7 +843,7 @@ def _flash_attn_fwd(
         and (tile_m % qhead_per_kvhead == 0 or not pack_gqa)
     )
 
-    # hd=256 2CTA forward uses dedicated kernel (Blackwell family)
+    # hd=256 2CTA 前向使用专用 kernel（Blackwell 家族）
     use_dedicated_hd256_kernel = arch // 10 in [10, 11] and head_dim == 256 and head_dim_v == 256
     use_2cta_instrs = use_2cta_instrs or use_dedicated_hd256_kernel
 
@@ -846,7 +854,7 @@ def _flash_attn_fwd(
         if arch // 10 == 8:
             raise NotImplementedError("Custom user-provided score_mod is not supported on SM8x architectures.")
         
-    # hash score and mask mods for compile cache
+    # 对 score_mod 和 mask_mod 求哈希，用于 compile cache
     score_mod_hash = utils.hash_callable(score_mod) if score_mod is not None else False
     mask_mod_hash = utils.hash_callable(mask_mod) if mask_mod is not None else False
 
@@ -857,15 +865,15 @@ def _flash_attn_fwd(
         or seqused_k is not None
     )
 
-    # CLC regressed for varlen MHA and dense noncausal. Imbalanced varlen shapes
-    # keep more K/V blocks in flight and hurt L2; dense noncausal mostly just
-    # pays work-stealing overhead.
+    # CLC（Cluster Launch Control）调度在 varlen MHA 和稠密非 causal 场景下反而退化。
+    # 不均衡的 varlen 形状会让更多 K/V block 同时在飞，损害 L2 命中；稠密非 causal
+    # 基本只是在为 work-stealing 的开销买单。
     is_varlen_mha = is_varlen and qhead_per_kvhead == 1
     is_dense_noncausal = not is_varlen and not causal and not local
     use_clc_scheduler = requested_use_clc_scheduler and not is_varlen_mha and not is_dense_noncausal
 
     if use_block_sparsity:
-        # NB: pack_gqa requires block sparse head dim == 1 (broadcasted)
+        # 注意：pack_gqa 要求 block sparse 的 head 维 == 1（广播）
         head_dim_idx = 0 if block_sparse_tensors.mask_block_cnt.ndim == 2 else 1
         if pack_gqa and block_sparse_tensors.mask_block_cnt.shape[head_dim_idx] != 1:
             pack_gqa = False
@@ -882,7 +890,7 @@ def _flash_attn_fwd(
                     "block_sparse_tensors.cu_block_idx_offsets."
                 )
 
-    # See get_broadcast_dims for why this is needed in compile key
+    # 为什么 compile key 里需要这个，参见 get_broadcast_dims
     block_sparse_broadcast_pattern = None
     normalized_block_sparse_tensors = None
     q_subtile_factor = 1
@@ -931,9 +939,9 @@ def _flash_attn_fwd(
         
         qv = maybe_contiguous(qv)
 
-        gather_kv_length = 2048  # dummy value
+        gather_kv_length = 2048  # 占位值
         sparse_kv = gather_kv_indices is not None
-        # always use kv bitmask by default (handles -1 sentinel)
+        # 默认总是使用 kv bitmask（用于处理 -1 哨兵值）
         disable_sparse_kv_bitmask = False
         if sparse_kv:
             assert gather_kv_indices.shape[:-1] == qv.shape[:-2]
@@ -967,7 +975,7 @@ def _flash_attn_fwd(
     is_varlen_q = cu_seqlens_q is not None or seqused_q is not None
     cluster_shape_m = 2 if use_2cta_instrs else 1
     if use_dedicated_hd256_kernel:
-        # The hd=256 2CTA fwd kernel does not support the dynamic-persistent scheduler.
+        # hd=256 2CTA 前向 kernel 不支持动态持久化调度器。
         scheduler_metadata = None
         reuse_scheduler_metadata = False
     if (
@@ -1030,8 +1038,8 @@ def _flash_attn_fwd(
         num_nheads_in_l2 = None
         tile_count_semaphore = None
 
-    # use binary batch search in SingleTileVarlenScheduler to avoid
-    # O(N^2) lookup; observed to be faster only for batch_size > BIN_BATCH_SEARCH_THRESH; this is tunable
+    # 在 SingleTileVarlenScheduler 中使用二分 batch 查找，避免 O(N^2) 的查找；
+    # 实测只在 batch_size > BIN_BATCH_SEARCH_THRESH 时才更快；该阈值可调
     cu_total_m_blocks = None
     cu_total_splits_m_blocks = None
     blocks_to_batch_idx = None
@@ -1070,8 +1078,8 @@ def _flash_attn_fwd(
             cu_total_m_blocks.device,
         )
 
-    # Tensor max_seqlen values (e.g. HF varlen) must not leak into the compile key:
-    # tensor identity changes on every call and defeats the JIT cache.
+    # 张量形式的 max_seqlen 值（例如 HF varlen）绝不能泄漏进 compile key：
+    # 张量身份每次调用都变，会直接击穿 JIT cache。
     is_static_persistent = (
         not causal
         and not local
@@ -1084,7 +1092,7 @@ def _flash_attn_fwd(
         and not is_split_kv
     )
 
-    # CuTe keeps stride-zero modes static when marking layouts dynamic.
+    # 在把 layout 标记为动态时，CuTe 会保持 stride-zero 的 mode 为静态。
     tensor_broadcast_patterns = tuple(
         get_broadcast_dims(tensor) if tensor is not None else None
         for tensor in (
@@ -1138,7 +1146,7 @@ def _flash_attn_fwd(
         is_split_kv,
         pack_gqa,
         arch,
-        page_size not in [None, tile_n],  # paged KV non-TMA
+        page_size not in [None, tile_n],  # paged KV 走非 TMA 路径
         use_2cta_instrs,
         q_subtile_factor,
         kv_subtile_factor,
@@ -1305,7 +1313,7 @@ def _flash_attn_fwd(
                 )
             else:
                 if use_dedicated_hd256_kernel:
-                    # hd=256 2CTA forward: check for currently unsupported features
+                    # hd=256 2CTA 前向：检查当前不支持的特性
                     assert softcap is None, "SM100 forward with head_dim=256 does not support softcap"
                     assert not use_block_sparsity, \
                         "SM100 forward with head_dim=256 does not support block sparsity"
@@ -1325,7 +1333,7 @@ def _flash_attn_fwd(
                             f"pass page_table[:, :{max_seqlen_k // page_size}] to slice to "
                             f"the actual sequence length"
                         )
-                    # pack_gqa is an auto-selected optimization; disable it for hd256 kernel
+                    # pack_gqa 是自动选择的优化；对 hd256 kernel 需要禁用它
                     pack_gqa = False
 
                 flash_fwd_obj_cls = (
@@ -1359,7 +1367,7 @@ def _flash_attn_fwd(
                     fa_fwd_kwargs["has_tile_count_semaphore"] = tile_count_semaphore is not None
                 fa_fwd = flash_fwd_obj_cls(head_dim, head_dim_v, **fa_fwd_kwargs)
         elif arch // 10 == 12:
-            # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity
+            # SM120（Blackwell GeForce / DGX Spark）：使用 SM80 MMA，拥有 SM120 的 SMEM 容量
             assert not use_block_sparsity, "Block sparsity not supported on SM 12.0"
             assert page_table is None, "Paged KV not supported on SM 12.0 in this PR"
             assert not is_split_kv, "SplitKV not supported on SM 12.0 in this PR"
@@ -1384,7 +1392,7 @@ def _flash_attn_fwd(
             raise ValueError(
                 f"Unsupported compute capability: {arch}. Supported: 8.x, 9.x, 10.x, 11.x, 12.x"
             )
-        # TODO: check @can_implement
+        # TODO: 检查 @can_implement
         if qv is not None:
             _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
                 fa_fwd,
@@ -1457,7 +1465,7 @@ def _flash_attn_fwd(
             for t in (q, k, v, qv)
         ]
         if is_fp8:
-            # need uint8 workaround until we pin torch >= 2.11.0 where fp8 export is supported
+            # 在固定到支持 fp8 导出的 torch >= 2.11.0 之前，需要用 uint8 变通
             q_call, k_call, v_call, qv_call = [
                 t.view(torch.uint8) if t is not None else None
                 for t in (q_call, k_call, v_call, qv_call)
@@ -1551,9 +1559,9 @@ def _flash_attn_fwd(
             _arch=arch,
         )
     if reuse_scheduler_metadata and tile_count_semaphore is not None:
-        # TODO: pass tile_count_semaphore to the combine kernel and zero it there when
-        # is_split_kv (using CTA 0, since a later CTA may have exited prematurely), so
-        # that this host-side zeroing is only needed when is_split_kv=False.
+        # TODO: 把 tile_count_semaphore 传给 combine kernel 并在其中清零（is_split_kv 时
+        # 用 CTA 0，因为后面的 CTA 可能提前退出），这样主机侧的清零只在
+        # is_split_kv=False 时才需要。
         tile_count_semaphore.zero_()
     return out, lse, p, row_max
 
@@ -1563,10 +1571,10 @@ _flash_attn_fwd.compile_cache = get_jit_cache("fwd")
 
 def make_fake_bwd_tensors(dtype, has_gqa, varlen_q, varlen_k, nheads_major=False):
     sym = cute.sym_int
-    # divisibility in elements: assumed_align_bytes = divisibility * dtype.width // 8
-    # For 16-byte align: fp16/bf16 → divisibility=8, float32 → divisibility=4
-    div = 128 // dtype.width  # 8 for fp16/bf16
-    # Shared sym_ints for dimensions that must match across tensors
+    # 元素个数形式的整除性：assumed_align_bytes = divisibility * dtype.width // 8
+    # 对于 16 字节对齐：fp16/bf16 → divisibility=8，float32 → divisibility=4
+    div = 128 // dtype.width  # fp16/bf16 时为 8
+    # 为跨张量必须一致的维度创建共享的 sym_ints
     b, seqlen_q, seqlen_k, h_q, d, d_v = sym(), sym(), sym(), sym(), sym(), sym()
     topk = sym()
     h_kv = h_q if not has_gqa else sym()
@@ -1628,7 +1636,7 @@ def _compile_bwd_preprocess(
     nheads_kv,
     has_cu_total_m_blocks,
 ):
-    """Compile bwd preprocess kernel using cute fake tensors (no real GPU tensors needed)."""
+    """使用 cute fake tensors 编译反向预处理 kernel（无需真实 GPU 张量）。"""
     mQ, mK, mV, mO, mdO, mdQ, mdK, mdV, mLSE, mLSElog2, mPdPsum, mdQaccum, mdKaccum, mdVaccum, mScaleP = make_fake_bwd_tensors(
         dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False, nheads_major=nheads_major,
     )
@@ -1668,14 +1676,14 @@ def _bwd_preprocess(
     use_padded_offsets=True,
     nheads_major=False,
     pack_gqa=False,
-    qhead_per_kvhead=1,  # only used with pack_gqa
-    nheads_kv=1,         # only used with pack_gqa
-    softmax_scale=1.0,   # only used with scale_p
+    qhead_per_kvhead=1,  # 仅 pack_gqa 时使用
+    nheads_kv=1,         # 仅 pack_gqa 时使用
+    softmax_scale=1.0,   # 仅 scale_p 时使用
     cu_total_m_blocks=None,
     *,
     fake_mode,
 ):
-    """Backward preprocess: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum."""
+    """反向预处理：计算 (o * dout).sum(dim=-1) - dLSE、lse * log2_e，并将 dq_accum 清零。"""
     if row_max is not None:
         assert scale_p is not None
     is_varlen = cu_seqlens_q is not None or seqused_q is not None
@@ -1724,7 +1732,7 @@ def _compile_bwd_postprocess(
     has_cu_total_m_blocks,
     learnable_sink_dtype,
 ):
-    """Compile bwd postprocess kernel using cute fake tensors."""
+    """使用 cute fake tensors 编译反向后处理 kernel。"""
     mQ, mK, mV, mO, mdO, mdQ, mdK, mdV, mLSE, mLSElog2, mPdPsum, mdQaccum, mdKaccum, mdVaccum, mScaleP = make_fake_bwd_tensors(
         dtype, has_gqa=True, varlen_q=has_cuseqlens_q, varlen_k=False
     )
@@ -1768,7 +1776,7 @@ def _bwd_postprocess_convert(
     *,
     fake_mode,
 ):
-    """Backward postprocess: convert float32 accumulator to bf16/fp16 output."""
+    """反向后处理：把 float32 累加器转换为 bf16/fp16 输出。"""
     is_varlen = cu_seqlens is not None or seqused is not None
     if is_varlen:
         batch_size = (cu_seqlens.shape[0] - 1) if cu_seqlens is not None else seqused.shape[0]
@@ -1889,7 +1897,7 @@ def _flash_attn_bwd(
     )
 
     if arch // 10 == 12:
-        # SM120: uses SM80 MMA with 99 KB SMEM, 128 threads (4 warps).
+        # SM120：使用 SM80 MMA，99 KB SMEM，128 线程（4 warps）。
         m_block_size = 64
         n_block_size = 64
         if head_dim <= 64:
@@ -2024,13 +2032,12 @@ def _flash_attn_bwd(
     if cluster_size == 2 and num_n_blocks % cluster_size != 0:
         seqlen_k_rounded = seqlen_k_rounded + n_block_size
 
-    # The single-block specialization below only guards against TVM stride poisoning,
-    # which is a host-side branch predicate that selects a kernel variant. When
-    # max_seqlen is passed as a tensor (e.g. HF/TE varlen), seqlen_*_rounded are tensors,
-    # so `seqlen_*_rounded // block == 1` would leak a tensor into the compile key. Its
-    # pickle hash differs every call, forcing a recompile per step. Only specialize when
-    # the seqlen is already a host scalar; tensor callers fall back to the multi-block
-    # default, keeping the key stable with no device sync.
+    # 下面的单 block 特化只是为了防御 TVM stride 污染（stride poisoning）——
+    # 它是选择 kernel 变体的主机侧分支谓词。当 max_seqlen 以张量传入（例如 HF/TE varlen）时，
+    # seqlen_*_rounded 也是张量，此时 `seqlen_*_rounded // block == 1` 会把张量泄漏进
+    # compile key。张量的 pickle 哈希每次调用都不同，会导致每步都重新编译。
+    # 因此只有当 seqlen 已经是主机侧标量时才特化；张量调用方回退到多 block 默认路径，
+    # 从而在无需设备同步的情况下保持 key 稳定。
     single_q_block = (not torch.is_tensor(seqlen_q_rounded)) and (seqlen_q_rounded // m_block_size == 1)
     single_k_block = (not torch.is_tensor(seqlen_k_rounded)) and (seqlen_k_rounded // n_block_size == 1)
 
@@ -2088,7 +2095,7 @@ def _flash_attn_bwd(
     qhead_per_kvhead = num_head // num_head_kv
     if pack_gqa is None:
         pack_gqa = qhead_per_kvhead > 1
-    # pack_gqa backward not yet supported in bwd
+    # pack_gqa 反向（bwd）尚未支持
     pack_gqa = False
     
     if softcap != 0.0:
@@ -2154,10 +2161,10 @@ def _flash_attn_bwd(
         dpsum = torch.empty(num_head, total_q_rounded_padded, dtype=torch.float32, device=device)
         lse_log2 = torch.empty(num_head, total_q_rounded_padded, dtype=torch.float32, device=device)
 
-    # GQA (qhead_per_kvhead > 1) needs dK/dV accum+postprocess since multiple Q heads
-    # accumulate into the same dK/dV. SM90 varlen_k with qhead_per_kvhead==1 now uses
-    # ragged TMA tensors for direct store, so no longer needs accum+postprocess.
-    # hd=256 2CTA backward has its own internal postprocess for dK/dV.
+    # GQA（qhead_per_kvhead > 1）需要 dK/dV 的累加+后处理，因为多个 Q head
+    # 会累加到同一个 dK/dV。SM90 上 qhead_per_kvhead==1 的 varlen_k 现在用
+    # ragged TMA 张量直接存储，不再需要累加+后处理。
+    # hd=256 2CTA 反向对 dK/dV 有自己内部的后处理。
     dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel
     if dKV_postprocess:
         head_dim_v_rounded = (head_dim_v + 32 - 1) // 32 * 32
@@ -2208,8 +2215,8 @@ def _flash_attn_bwd(
         dK_semaphore = None
         dV_semaphore = None
 
-    # SingleTileVarlenScheduler batch-lookup aid, above BIN_BATCH_SEARCH_THRESH;
-    # shared across preprocess, main bwd, and the three postprocess calls.
+    # SingleTileVarlenScheduler 的 batch 查找辅助（batch_size 高于 BIN_BATCH_SEARCH_THRESH 时）；
+    # 在预处理、主反向以及三次后处理调用之间共享。
     cu_total_m_blocks_q = None
     cu_total_m_blocks_k = None
     if is_varlen and batch_size > BIN_BATCH_SEARCH_THRESH and not use_dedicated_hd256_kernel:
@@ -2227,8 +2234,8 @@ def _flash_attn_bwd(
 
     dsink = torch.empty_like(learnable_sink) if learnable_sink is not None else None
 
-    # Preprocess kernel: compute (o * dout).sum(dim=-1) - dLSE, lse * log2_e, and zero out dq_accum.
-    # For hd=256 dedicated path, dq_accum is None so preprocess only fills dpsum/lse_log2.
+    # 预处理 kernel：计算 (o * dout).sum(dim=-1) - dLSE、lse * log2_e，并把 dq_accum 清零。
+    # 对 hd=256 专用路径，dq_accum 为 None，预处理只填充 dpsum/lse_log2。
     _bwd_preprocess(
         out, dout, dpsum, lse, lse_log2, dq_accum,
         cu_seqlens_q, seqused_q, dlse,
@@ -2236,12 +2243,12 @@ def _flash_attn_bwd(
         cu_total_m_blocks=cu_total_m_blocks_q,
         fake_mode=fake_mode,
     )
-    # num_threads: SM90 derives from BwdConfig.num_wg, SM120 is set to 128 above,
-    # SM100/SM110 uses default from function signature (384).
+    # num_threads：SM90 由 BwdConfig.num_wg 推导，SM120 上面已设为 128，
+    # SM100/SM110 使用函数签名里的默认值（384）。
     if arch // 10 not in [9, 12]:
         num_threads = 384
 
-    # Backward kernel: compute dk, dv, dq_accum.
+    # 反向 kernel：计算 dk、dv、dq_accum。
     score_mod_hash = utils.hash_callable(score_mod) if score_mod else False
     score_mod_bwd_hash = utils.hash_callable(score_mod_bwd) if score_mod_bwd else False
     mask_mod_hash = utils.hash_callable(mask_mod) if mask_mod else False
@@ -2332,7 +2339,7 @@ def _flash_attn_bwd(
             get_broadcast_dims(k),
             get_broadcast_dims(v),
             get_broadcast_dims(dout),
-            # Prevent TVM stride poisoning when only one block is present.
+            # 只有一个 block 时，防止 TVM stride 污染。
             single_q_block,
             single_k_block,
             cu_total_m_blocks_k is not None,
@@ -2373,7 +2380,7 @@ def _flash_attn_bwd(
             get_broadcast_dims(k),
             get_broadcast_dims(v),
             get_broadcast_dims(dout),
-            # Prevent TVM stride poisoning when only one block is present.
+            # 只有一个 block 时，防止 TVM stride 污染。
             single_q_block,
             single_k_block,
             cu_total_m_blocks_k is not None,
@@ -2511,7 +2518,7 @@ def _flash_attn_bwd(
                     kv_subtile_factor=kv_subtile_factor,
                 )
 
-        # Block sparse tensors for backward use Q-direction indexing (transposed from forward).
+        # 反向的 block sparse 张量使用 Q 方向的索引（相对前向做了转置）。
         sparse_tensors_compile = None
         if normalized_block_sparse_tensors is not None:
             sparse_tensors_compile = to_cute_block_sparse_tensors(normalized_block_sparse_tensors)
@@ -2545,7 +2552,7 @@ def _flash_attn_bwd(
             compile_args.append(cu_total_m_blocks_k_tensor)
         compile_args.append(current_stream)
 
-        # TODO: check @can_implement
+        # TODO: 检查 @can_implement
         _flash_attn_bwd.compile_cache[compile_key] = cute.compile(
             *compile_args, options="--enable-tvm-ffi"
         )
@@ -2588,11 +2595,11 @@ def _flash_attn_bwd(
         if not use_dedicated_hd256_kernel:
             call_args.append(cu_total_m_blocks_k)
         _flash_attn_bwd.compile_cache[compile_key](*call_args)
-    # Postprocess: convert dq_accum from float32 to dq in bf16/fp16
-    # hd=256 2CTA backward has its own internal postprocess, skip here.
+    # 后处理：把 dq_accum 从 float32 转换为 bf16/fp16 的 dq
+    # hd=256 2CTA 反向有内部的后处理，这里跳过。
     if not use_dedicated_hd256_kernel:
         if arch // 10 == 9:
-            # dQ postprocess: match main kernel's MMA WG count, unless dQ_single_wg
+            # dQ 后处理：与主 kernel 的 MMA warp group 数量保持一致，除非 dQ_single_wg
             num_threads_post_dQ = 128 if dQ_single_wg else cfg.num_wg * 128
             num_threads_post_dKV = cfg.num_wg * 128
         else:
@@ -2615,7 +2622,7 @@ def _flash_attn_bwd(
         )
 
         if dKV_postprocess:
-            # Postprocess: convert dk_accum from float32 to dk in bf16/fp16
+            # 后处理：把 dk_accum 从 float32 转换为 bf16/fp16 的 dk
             _bwd_postprocess_convert(
                 dk_accum, dk, softmax_scale,
                 cu_seqlens_k, seqused_k,
@@ -2625,7 +2632,7 @@ def _flash_attn_bwd(
                 cu_total_m_blocks=cu_total_m_blocks_k if cluster_size == 1 else None,
                 fake_mode=fake_mode,
             )
-            # Postprocess: convert dv_accum from float32 to dv in bf16/fp16
+            # 后处理：把 dv_accum 从 float32 转换为 bf16/fp16 的 dv
             _bwd_postprocess_convert(
                 dv_accum, dv, 1.0,
                 cu_seqlens_k, seqused_k,
@@ -2728,7 +2735,7 @@ def _flash_attn_bwd_sparse_mla(
 
     assert varlen_q == varlen_k, "sparse MLA bwd: either q and k are both varlen or not"
 
-    # always use kv bitmask by default (handles -1 sentinel)
+    # 默认总是使用 kv bitmask（用于处理 -1 哨兵值）
     disable_sparse_kv_bitmask = False
     # if min_seqlen_k is None or causal:
     #     disable_sparse_kv_bitmask = False
@@ -2767,7 +2774,7 @@ def _flash_attn_bwd_sparse_mla(
 
     dtype = torch2cute_dtype_map[dout.dtype]
 
-    # Preprocess kernel: compute (o * dout).sum(dim=-1), scale_p.
+    # 预处理 kernel：计算 (o * dout).sum(dim=-1) 和 scale_p。
     _bwd_preprocess(
         out, dout, dpsum, lse, None, None,
         cu_seqlens_q, seqused_q, None,
@@ -2885,8 +2892,8 @@ def _flash_attn_bwd_sparse_mla(
         _sparse_mla_dk(ds, gather_kv_indices, q, dk, cu_seqlens_q, cu_seqlens_k)
         dk = dk.unsqueeze(-2)
     
-    # return dk, dv in float32: all-reduce across sequence-parallel ranks must happen
-    # before downcasting to avoid rounding error during inter-rank grad accumulation
+    # 以 float32 返回 dk、dv：跨序列并行 rank 的 all-reduce 必须发生在降精度之前，
+    # 以避免 rank 间梯度累加时的舍入误差
     return dq, dk, dv, dqv
 
 _flash_attn_bwd_sparse_mla.compile_cache = get_jit_cache("bwd_dsa")
@@ -2901,7 +2908,7 @@ def _compile_sparse_mla_dq_dqv(
     b_seqlenq = (b, seqlen_q) if not varlen_q else (total_q,)
     b_seqlenk = (b, seqlen_k) if not varlen_k else (total_k,)
     
-    div = 128 // dtype.width  # 8 for fp16/bf16
+    div = 128 // dtype.width  # fp16/bf16 时为 8
     
     mdS = fake_tensor(dtype, (*b_seqlenq, nheads, top_k), divisibility=div)
     mK = fake_tensor(dtype, (*b_seqlenk, head_dim), divisibility=div)
@@ -2939,7 +2946,7 @@ def _compile_sparse_mla_dq_dqv(
 def _sparse_mla_dq_dqv(
     ds, k, v, dq, dqv, gather_kv_indices, cu_seqlens_q, cu_seqlens_k,
 ):
-    """Compute dQ = dS @ K and dQv = dS @ V"""
+    """计算 dQ = dS @ K 以及 dQv = dS @ V"""
     *_, nheads, gather_kv_length = ds.shape
     
     head_dim_v = v.shape[-1]
@@ -2980,7 +2987,7 @@ def _compile_sparse_mla_dk(
         head_dim,
         varlen,
     )
-    # Check if configuration can be implemented
+    # 检查该配置能否被实现
     kernel.check_can_implement()
 
     div = 128 // dtype.width
@@ -3021,21 +3028,21 @@ def _sparse_mla_dk(
     cu_seqlens_q: Optional[torch.Tensor],
     cu_seqlens_k: Optional[torch.Tensor],
 ):
-    """Compute dKaccum = scatter(dS'^T @ Q, I).
+    """计算 dKaccum = scatter(dS'^T @ Q, I)（按 topk 索引把梯度分散累加到 dK）。
 
     Args:
       dS:          (*total_q, heads, topk), bf16
       index_topk:  (*total_q, topk), int32
       Q:           (*total_q, heads, dim), bf16
       dK:          (*total_q, dim), fp32
-      cuSeqlensQ:  (batch + 1,), int32, omit for non-varlen
-      cuSeqlensK:  (batch + 1,), int32, omit for non-varlen
+      cuSeqlensQ:  (batch + 1,), int32, 非 varlen 时省略
+      cuSeqlensK:  (batch + 1,), int32, 非 varlen 时省略
 
-    Accumulates in place on top of dK.
+    在 dK 原有内容上原地累加。
 
-    For varlen, total_q and total_k are 1-dimensional, and the seqlen indices per batch are
-    determined using the cuSeqlensQ and cuSeqlensK tensors.
-    For non-varlen, total_q and total_k are (batch, seqlen_q) and (batch, seqlen_k).
+    对 varlen：total_q 和 total_k 是一维的，每个 batch 的 seqlen 索引由
+    cuSeqlensQ 和 cuSeqlensK 张量确定。
+    对非 varlen：total_q、total_k 分别是 (batch, seqlen_q) 与 (batch, seqlen_k)。
     """
     dtype = dS.dtype
     dtype_cute = torch2cute_dtype_map[dtype]
@@ -3088,9 +3095,9 @@ class FlashAttnFunc(torch.autograd.Function):
         aux_scalars = tuple(aux_scalars) if aux_scalars else None
         shared_kv = k is v
         if shared_kv and v.shape[-1] == 512:
-            # specialize MLA attention formula
+            # 特化 MLA 注意力公式
             # O = softmax(Q @ K.T + Qv @ V.T) @ V
-            # by setting q, k to None
+            # 通过把 q、k 设为 None 来实现
             qv = q if qv is None else qv
             q = k = None
         out, lse, p, row_max = _flash_attn_fwd(
@@ -3227,9 +3234,9 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         aux_scalars = tuple(aux_scalars) if aux_scalars else None
         shared_kv = k is v
         if shared_kv and v.shape[-1] == 512:
-            # specialize MLA attention formula
+            # 特化 MLA 注意力公式
             # O = softmax(Q @ K.T + Qv @ V.T) @ V
-            # by setting q, k to None
+            # 通过把 q、k 设为 None 来实现
             qv = q if qv is None else qv
             q = k = None
         out, lse, p, row_max = _flash_attn_fwd(
@@ -3450,6 +3457,14 @@ def flash_attn_varlen_func(
     disable_scheduler_metadata: bool = False,
 ):
     """
+    变长（varlen）FlashAttention 的对外接口。
+
+    varlen 与 flash_attn_func 的区别：batch 内各条序列的长度可以不同，Q/K/V 被
+    「拼接」成一维的 (total_q, ...) / (total_k, ...)，再用 cu_seqlens_q / cu_seqlens_k
+    记录每个 batch 的累积起始位置（cu_seqlens[i] 到 cu_seqlens[i+1] 即第 i 条序列的
+    长度区间）。max_seqlen_q / max_seqlen_k 给出最大的可能长度，用于 kernel 端
+    预分配与 tile 规划。
+
     Tensor arguments:
         q:  (total_q, nheads,   hdim)   or (batch, seqlen_q, nheads,   hdim)
         k:  (total_k, nheads_k, hdim)   or (batch, seqlen_k, nheads_k, hdim)
@@ -3460,34 +3475,39 @@ def flash_attn_varlen_func(
         gather_kv_indices: (total_q, gather_kv_length) or
                            (batch, seqlen_q, gather_kv_length)
         page_table: (batch, max_num_pages_per_seq)
-    
+        说明：q/k/v 传一维形式时是 varlen；传 (batch, seqlen, ...) 形式时是标准 batched。
+        seqused_q/seqused_k 与 cu_seqlens 二选一，用于表示每个 batch 实际参与计算的长度。
+
     Return:
        out: (total_q, nheads, hdim) or (batch, seqlen_q, nheads, hdim)
        lse: (nheads, total_q)       or (batch, nheads, seqlen_q) if not has_qv (standard)
             (total_q, nheads)       or (batch, seqlen_q, nheads) if has_qv
 
-    Explanation of some optional arguments & decisions:
+    部分可选参数与设计取舍的说明：
 
-    qv: we write the MLA weight absorbed formula as
+    qv: 我们把 MLA（Multi-head Latent Attention）权重吸收公式写成
         O = softmax(scale * (Q @ K.T + Qv @ V.T)) @ V
-        where Q = q_pe, Qv = q_nope, K = pe_cache, V = kv_cache.
+        其中 Q = q_pe, Qv = q_nope, K = pe_cache, V = kv_cache。
+        qv 是 MLA 专用的「第二组 query」，用于把权重吸收进 V 侧，从而避免在
+        KV cache 中存完整的 K。
 
-    lse return shape: with Qv, MQA with nheads at least divisible by 4 is typical,
-        so we arrange for nheads as the contiguous mode for better vectorization.
+    lse 返回形状：有 qv 时典型是 MQA 且 nheads 至少被 4 整除，因此我们让 nheads
+        作为连续维以利于向量化。
 
-    gather_kv_indices: used for topk sparsity with MLA absorption kernel.
+    gather_kv_indices: 与 MLA absorption kernel 配合，用于 topk 稀疏：只对每个 query
+        预先选定的 gather_kv_length 个 KV 做注意力，索引就存在这里。
 
-    min_seqlen_k: for varlen, specifies the minimum kv sequence length for any batch.
-        Used with gather_kv_indices to determine if we need oob masking.
+    min_seqlen_k: 对 varlen 而言，指定任意 batch 的最小 kv 序列长度。
+        与 gather_kv_indices 一起用于判断是否需要 oob（越界）mask。
 
-    scheduler_metadata: optional tensors used by certain tile schedulers, for optimization
-        and functionality. computed in get_scheduler_metadata.
+    scheduler_metadata: 供某些 tile scheduler 使用的可选张量，用于优化与功能扩展，
+        由 get_scheduler_metadata 计算。
 
-    seqlen_k_per_split: when using dynamic (per-batch) num_splits, can set a fixed seqlen_k to be
-        covered per split for bitwise reproducibility.
+    seqlen_k_per_split: 使用动态（按 batch）num_splits 时，可固定每个 split 覆盖的
+        seqlen_k，以实现前向/反向的逐位可复现（bitwise reproducibility）。
 
-    disable_scheduler_metadata: if True, ignores scheduler_metadata if it is passed and skips
-        computing metadata fresh.
+    disable_scheduler_metadata: 为 True 时忽略传入的 scheduler_metadata，
+        并跳过重新计算元数据的步骤。
     """
     return FlashAttnVarlenFunc.apply(
         q,
@@ -3529,9 +3549,9 @@ def _compile_fwd_combine(
     has_cu_seqlens, has_seqused, has_lse, has_virtual_batch_idx,
     has_num_splits_dynamic, has_semaphore_to_reset,
 ):
-    """Compile fwd combine kernel using cute fake tensors (no real GPU tensors needed)."""
+    """使用 cute fake tensors 编译前向 combine kernel（无需真实 GPU 张量）。"""
     sym = cute.sym_int
-    div = 128 // dtype_partial.width  # 16-byte alignment in elements
+    div = 128 // dtype_partial.width  # 元素个数意义上的 16 字节对齐
 
     fa_combine = FlashAttentionForwardCombine(
         dtype=dtype,
@@ -3551,14 +3571,14 @@ def _compile_fwd_combine(
         )
 
     if has_cu_seqlens:
-        # Varlen: (num_splits, total_q, nheads, headdim)
+        # 变长：(num_splits, total_q, nheads, headdim)
         num_splits, total_q, nheads = sym(), sym(), sym()
         mO_partial = fake_tensor(dtype_partial, (num_splits, total_q, nheads, head_dim), divisibility=div)
         mLSE_partial = fake_tensor(Float32, (num_splits, total_q, nheads), divisibility=1, leading_dim=1)
         mO = fake_tensor(dtype, (total_q, nheads, head_dim), divisibility=div)
         mLSE = fake_tensor(Float32, (total_q, nheads), divisibility=1, leading_dim=0) if has_lse else None
     else:
-        # Batched: (num_splits, batch, seqlen, nheads, headdim)
+        # 批处理：(num_splits, batch, seqlen, nheads, headdim)
         num_splits, batch, seqlen, nheads = sym(), sym(), sym(), sym()
         mO_partial = fake_tensor(dtype_partial, (num_splits, batch, seqlen, nheads, head_dim), divisibility=div)
         mLSE_partial = fake_tensor(Float32, (num_splits, batch, seqlen, nheads), divisibility=1, leading_dim=2)
@@ -3596,23 +3616,26 @@ def _flash_attn_fwd_combine(
     *,
     _arch: Optional[int] = None,
 ) -> None:
-    """Forward combine kernel for split attention computation.
+    """Split attention 的前向 combine kernel。
 
-    Combines partial outputs and log-sum-exp values from multiple splits
-    of attention computation into final outputs.
+    把注意力计算多个 split（num_splits > 1 的 SplitKV）产生的部分输出与
+    log-sum-exp 值合并为最终输出。每个 split 各自维护局部的行最大值与行求和，
+    combine 阶段用 LSE 重新归一化，保证结果与不 split 时数值一致。
 
     Args:
-        out_partial: Partial outputs tensor (num_splits, batch, seqlen, nheads, headdim) or
-                                            (num_splits, total_q, nheads, headdim) if there's cu_seqlens
-        lse_partial: Partial LSE tensor (num_splits, batch, seqlen, nheads) or
-                                       (num_splits, total_q, nheads) if there's cu_seqlens
-        out: Output tensor (batch, seqlen, nheads, headdim) or (total_q, nheads, headdim) if there's cu_seqlens
-        lse: Output LSE tensor (batch, seqlen, nheads) or (total_q, nheads) if there's cu_seqlens.
-        cu_seqlens: Cumulative sequence lengths for variable length sequences
-        seqused: Used sequence lengths for each batch
-        num_splits_dynamic_ptr: Dynamic number of splits per batch
-        semaphore_to_reset: Semaphore for synchronization
-        k_block_size: Block size for head dimension
+        out_partial: 部分输出张量，形状 (num_splits, batch, seqlen, nheads, headdim)；
+            有 cu_seqlens 时为 (num_splits, total_q, nheads, headdim)
+        lse_partial: 部分 LSE 张量，形状 (num_splits, batch, seqlen, nheads)；
+            有 cu_seqlens 时为 (num_splits, total_q, nheads)
+        out: 输出张量，形状 (batch, seqlen, nheads, headdim)；
+            有 cu_seqlens 时为 (total_q, nheads, headdim)
+        lse: 输出的 LSE 张量，形状 (batch, seqlen, nheads)；
+            有 cu_seqlens 时为 (total_q, nheads)
+        cu_seqlens: 变长序列的累积序列长度
+        seqused: 每个 batch 实际使用的序列长度
+        num_splits_dynamic_ptr: 每个 batch 的动态 split 数量
+        semaphore_to_reset: 用于同步的信号量
+        k_block_size: head 维度方向上的块大小
 
     Returns:
         None
@@ -3638,19 +3661,19 @@ def _flash_attn_fwd_combine(
     num_head = out_partial.shape[-2]
     num_splits = out_partial.shape[0]
     assert num_splits <= 256
-    # If hdim is 96 or 192, it's faster to round them to 128 or 256 respectively
-    # so that kBlockM is smaller and we have more parallelism.
+    # 如果 hdim 是 96 或 192，把它们分别向上取整到 128 或 256 会更快，
+    # 因为这样 kBlockM 更小，我们能获得更多并行度。
     k_block_size = 64 if head_dim <= 64 else 128
-    # We want kBlockM to be as small as possible to maximize parallelism.
-    # E.g., if hdim is 64, we want kBlockM to be 16 so that we can use 256 threads, each reading 4 elements (floats).
+    # 我们希望 kBlockM 尽可能小以最大化并行度。
+    # 例如 hdim 为 64 时，kBlockM 取 16，这样能用 256 个线程，每个线程读 4 个元素（float）。
     tile_m = 8 if k_block_size % 128 == 0 else (16 if k_block_size % 64 == 0 else 32)
     log_max_splits = max(math.ceil(math.log2(num_splits)), 4)
     if tile_m == 8:
-        # If kBlockM == 8 then the minimum number of splits is 32.
-        # TODO: we can deal w this by using 128 threads instead
+        # 如果 kBlockM == 8，那么最小的 split 数量是 32。
+        # TODO: 我们可以改用 128 线程来解决这个问题
         log_max_splits = max(log_max_splits, 5)
 
-    # Create combine kernel configuration
+    # 创建 combine kernel 配置
     dtype = torch2cute_dtype_map[out.dtype]
     dtype_partial = torch2cute_dtype_map[out_partial.dtype]
     compile_key = (
@@ -3694,56 +3717,56 @@ def flash_attn_combine(
     virtual_batch_idx: Optional[torch.Tensor] = None,
     return_lse: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """Flash Attention combine function for split attention computation.
+    """Split attention 的 FlashAttention combine 函数（面向用户的入口）。
 
-    Combines partial outputs and log-sum-exp values from multiple splits
-    of attention computation into final outputs. This is the main user-facing
-    interface for the combine kernel.
+    把注意力计算多个 split 产生的部分输出与 log-sum-exp 值合并为最终输出。
+    这是 combine kernel 的主要用户接口。通常不需要手动调用——在 num_splits > 1 时
+    flash_attn_func / flash_attn_varlen_func 内部会自动完成 combine；此函数用于
+    拿到 partial 结果后需要自行合并的场景。
 
     Args:
-        out_partial: Partial outputs tensor with shape:
-            - (num_splits, batch_size, seqlen, num_heads, head_size) for regular batched input
-            - (num_splits, total_q, num_heads, head_size) for variable length input
-        lse_partial: Partial LSE tensor with shape:
-            - (num_splits, batch_size, seqlen, num_heads) for regular batched input
-            - (num_splits, total_q, num_heads) for variable length input
-        out: Optional output tensor. If None, will be created automatically.
-        out_dtype: Optional output dtype. If None, will use fp16/bf16 based on input.
-        cu_seqlens: Cumulative sequence lengths for variable length sequences
-        seqused: Used sequence lengths for each batch
-        virtual_batch_idx: Optional mapping from virtual batch index to real batch index
-            (int32 tensor of shape (batch_size,)). Used by persistent tile schedulers
-            that reorder batch processing for load balancing.
-        return_lse: Whether to return the combined LSE tensor. Default is True.
+        out_partial: 部分输出张量，形状：
+            - (num_splits, batch_size, seqlen, num_heads, head_size) 普通 batched 输入
+            - (num_splits, total_q, num_heads, head_size) 变长输入
+        lse_partial: 部分 LSE 张量，形状：
+            - (num_splits, batch_size, seqlen, num_heads) 普通 batched 输入
+            - (num_splits, total_q, num_heads) 变长输入
+        out: 可选输出张量。为 None 时自动创建。
+        out_dtype: 可选输出 dtype。为 None 时根据输入使用 fp16/bf16。
+        cu_seqlens: 变长序列的累积序列长度
+        seqused: 每个 batch 实际使用的序列长度
+        virtual_batch_idx: 可选的「虚拟 batch 索引 -> 真实 batch 索引」映射
+            （int32 张量，形状 (batch_size,)）。持久化 tile scheduler 为做负载均衡
+            重排 batch 处理顺序时会用到。
+        return_lse: 是否返回合并后的 LSE 张量。默认 True。
 
     Returns:
-        Tuple of (out, lse) where:
-        - out: Combined output tensor with shape (batch_size, seqlen, num_heads, head_size)
-              or (total_q, num_heads, head_size) for varlen
-        - lse: Combined log-sum-exp tensor with shape (batch_size, seqlen, num_heads)
-              or (total_q, num_heads) for varlen. None if return_lse=False
+        (out, lse) 元组，其中：
+        - out: 合并后的输出张量，形状 (batch_size, seqlen, num_heads, head_size)
+              或 varlen 下的 (total_q, num_heads, head_size)
+        - lse: 合并后的 log-sum-exp 张量，形状 (batch_size, seqlen, num_heads)
+              或 varlen 下的 (total_q, num_heads)。return_lse=False 时为 None
 
     Note:
-        This function expects the input tensors to be in the format produced by
-        split attention computation, where the first dimension is num_splits.
-        The permuting from user format to kernel format is now done inside the kernel.
+        本函数期望输入张量是 split 注意力计算产生的格式，即第一维是 num_splits。
+        从用户格式到 kernel 格式的转置现在在 kernel 内部完成。
     """
-    # Input validation
+    # 输入校验
     assert out_partial.dim() in [4, 5], "out_partial must have 4 or 5 dimensions"
-    # Determine if this is variable length based on dimensions
+    # 根据维度判断是否为变长
     is_varlen = out_partial.dim() == 4
     if is_varlen:
-        # Variable length: (num_splits, total_q, num_heads, head_size)
+        # 变长：(num_splits, total_q, num_heads, head_size)
         num_splits, total_q, num_heads, head_size = out_partial.shape
-        batch_size = 1  # Treat as single batch for varlen
+        batch_size = 1  # varlen 场景下视为单个 batch
         seqlen = total_q
     else:
-        # Regular batched: (num_splits, batch_size, seqlen, num_heads, head_size)
+        # 常规批处理：(num_splits, batch_size, seqlen, num_heads, head_size)
         num_splits, batch_size, seqlen, num_heads, head_size = out_partial.shape
-    # Determine output dtype
+    # 确定输出 dtype
     if out_dtype is None:
         out_dtype = out_partial.dtype
-    # Create output if not provided
+    # 未提供时创建输出
     device = out_partial.device
     if out is None:
         if is_varlen:
@@ -3752,7 +3775,7 @@ def flash_attn_combine(
             out = torch.empty(
                 batch_size, seqlen, num_heads, head_size, dtype=out_dtype, device=device
             )
-    # Create lse output only if requested
+    # 仅在被要求时才创建 lse 输出
     if return_lse:
         if is_varlen:
             lse = torch.empty(num_heads, total_q, dtype=torch.float32, device=device)
@@ -3814,7 +3837,7 @@ def _get_scheduler_metadata(
     if headdim_v is None:
         headdim_v = headdim
 
-    # Override enable_pdl (not supported yet)
+    # 覆盖 enable_pdl（暂不支持）
     enable_pdl = False
 
     assert not sort, "LPT batch sort not yet implemented"
@@ -3970,7 +3993,7 @@ def _get_scheduler_metadata(
         tile_count_semaphore = None
 
     qhead_per_kvhead = nheads // nheads_kv
-    # binary-search hint; only consumed by the single-tile scheduler above this batch
+    # 二分查找提示；仅当 batch 大小超过阈值时才被 single-tile scheduler 使用
     has_varlen_info = (
         cu_seqlens_q is not None or seqused_q is not None
     )
@@ -4043,22 +4066,22 @@ def get_scheduler_metadata(
     seqlen_k_per_split: Optional[int] = None,
     _arch: Optional[int] = None,
 ) -> SchedulerMetadataTensorsTorch:
-    """Prepares metadata tensors used by varlen tile schedulers (SingleTileVarlenScheduler
-    and DynamicPersistentVarlenScheduler)
+    """准备 varlen tile scheduler（SingleTileVarlenScheduler 与
+    DynamicPersistentVarlenScheduler）所需的元数据张量。
 
-    Explanation of selected args:
-        num_splits: maximum number of splits per batch entry that the prepare kernel can emit
-        seqlen_k_per_split: for bitwise reproducibility between forward and backward, can fix
-            an exact seqlen_k per split; num_splits is calculated accordingly.
+    选中的参数说明：
+        num_splits: prepare kernel 对每个 batch 条目最多可发出的 split 数量
+        seqlen_k_per_split: 为在正向/反向之间实现逐位可复现，可固定每个 split 覆盖的
+            精确 seqlen_k；num_splits 会据此推算。
 
     Returns
-        SchedulerMetadataTensorsTorch, a named tuple including:
-        - num_splits_dynamic_ptr: per-batch num_splits
-        - num_nheads_in_l2_ptr: used for head swizzle to avoid l2 cache thrashing
-        - tile_count_semaphore: the global semaphore used by DynamicPersistentVarlenScheduler atomic incrementation
-        - cu_total_m_blocks: cumsum tensor counting total m_blocks, used for binary batch search with large batch_size
-        - cu_total_splits_m_blocks: complementary cumsum tensor used for binary batch search and to
-            extract dynamic num splits in the absense of num_splits_dynamic_ptr
+        SchedulerMetadataTensorsTorch，一个 named tuple，包含：
+        - num_splits_dynamic_ptr: 每个 batch 的 num_splits
+        - num_nheads_in_l2_ptr: 用于 head swizzle（打乱 head 顺序）以避免 L2 cache 抖动
+        - tile_count_semaphore: DynamicPersistentVarlenScheduler 做原子自增用的全局信号量
+        - cu_total_m_blocks: 统计总 m_blocks 数的 cumsum 张量，用于大批量下的二分 batch 查找
+        - cu_total_splits_m_blocks: 与之互补的 cumsum 张量，用于二分 batch 查找，
+            以及在没有 num_splits_dynamic_ptr 时提取动态 split 数量
     """
     arch = _get_device_arch() if _arch is None else _arch
     if headdim_v is None:
@@ -4128,8 +4151,8 @@ def get_scheduler_metadata(
         pack_gqa=pack_gqa,
         q_stage=q_stage,
         causal=causal,
-        enable_pdl=False,  # pdl not yet enabled
-        sort=False,  # LPT batch sort not yet enabled
+        enable_pdl=False,  # pdl 尚未启用
+        sort=False,  # LPT batch 排序尚未启用
         seqlen_k_new=seqlen_k_new,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
